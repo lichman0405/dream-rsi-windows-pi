@@ -29,16 +29,25 @@ branch, not a claim that Dream-RSI is harmful.
 
 ## Paired runs
 
-| split | repeat | A | B | C | A − B |
-| --- | --- | --- | --- | --- | --- |
-| 101 | 1 | 0.8408 | 0.8443 | 0.6948 | −0.0035 |
-| 101 | 2 | 0.7827 | 0.8460 | 0.7735 | −0.0633 |
-| 211 | 1 | 0.8560 | 0.8360 | 0.7455 | +0.0200 |
-| 211 | 2 | 0.8605 | 0.8597 | 0.8251 | +0.0008 |
+`S` is the normalised node score; `Q` is the raw mean recommended uptake in mol/kg, so the
+difference can be read as a physical quantity and not only as a ratio. `Q*` for the sealed
+pool is 9.054 mol/kg.
 
-Numbers are the sealed-pool `S` of each arm's frozen final candidate. `Q` (raw uptake,
-mol/kg) moves with them; the full table including `Q` and the per-checkpoint curve is in
-`report.json` and `fig3_paired_final_comparison.csv`.
+| split | repeat | A `S` | A `Q` | B `S` | B `Q` | C `S` | C `Q` | A−B `S` | A−B `Q` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 101 | 1 | 0.8408 | 7.613 | 0.8443 | 7.644 | 0.6948 | 6.291 | −0.0035 | −0.032 |
+| 101 | 2 | 0.7827 | 7.086 | 0.8460 | 7.659 | 0.7735 | 7.004 | −0.0633 | −0.573 |
+| 211 | 1 | 0.8560 | 7.750 | 0.8360 | 7.569 | 0.7455 | 6.749 | +0.0200 | +0.181 |
+| 211 | 2 | 0.8605 | 7.791 | 0.8597 | 7.784 | 0.8251 | 7.471 | +0.0008 | +0.008 |
+| **mean** | | **0.8350** | **7.560** | **0.8465** | **7.664** | **0.7597** | **6.879** | **−0.0115** | **−0.104** |
+
+Read as material performance: A's top ten average **7.56 mol/kg** against B's **7.66** and
+C's 6.88, out of a pool whose true best ten average 9.05. The gap between A and B is about a
+tenth of a mole per kilogram — under the noise of which materials happen to land in a
+ten-material shortlist, which is the same statement the interval makes.
+
+The per-checkpoint curve and the full table are in `report.json` and
+`fig3_paired_final_comparison.csv`.
 
 ## Development against the sealed pool
 
