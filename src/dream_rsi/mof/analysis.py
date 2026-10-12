@@ -37,12 +37,21 @@ BOOTSTRAP_SEED = 20261012
 
 @dataclass(frozen=True)
 class UnsealResult:
-    """One frozen candidate, measured once on the sealed pool."""
+    """One frozen candidate, measured once on the sealed pool.
+
+    ``checkpoint`` says which budget checkpoint chose it and ``is_final`` marks
+    the one the arm is judged on. Both are kept because the design asks for two
+    different things from the same measurement: a per-checkpoint curve (figure
+    2) and a single number per paired run (figure 3). They are the same pool,
+    read at the same time, and neither is recomputed later.
+    """
 
     run_id: str
     method: str
     split_seed: int
     repeat: int
+    checkpoint: int
+    is_final: bool
     origin: str
     candidate_sha256: str
     development_S: float
@@ -75,54 +84,75 @@ def unseal_block(
     runner_script: Path,
     workdir_root: Path,
     permutations: int = ROW_ORDER_PERMUTATIONS,
-) -> UnsealResult:
-    """Grade one block's final frozen candidate against the sealed test pool."""
+) -> list[UnsealResult]:
+    """Grade every candidate this block froze, in one pass over the sealed pool.
+
+    All of them, not just the last: the checkpoint candidates were selected in
+    advance on the development score, exactly like the final one, so evaluating
+    them is the pre-registered procedure rather than a second look. What would
+    be illegitimate is grading the *tree* and picking the best node afterwards,
+    and that does not happen here -- only candidates named in the freeze file
+    are measured, and nothing measured is fed back into a selection.
+    """
     plan = record["plan"]
     split_seed = int(plan["split_seed"])
+    frozen = list(record.get("frozen") or [])
     final = record.get("final_candidate")
-    if not final:
-        raise ValueError(f"block {record.get('run_id')} has no frozen candidate to unseal")
+    if not frozen and final:
+        frozen = [final]
+    if not frozen:
+        raise ValueError(f"block {record.get('run_id')} froze no candidate to unseal")
 
     pool = MofPool.final_test(prepared_root, split_seed=split_seed)
     labels = pool.load_labels()
+    workdir = workdir_root / f"{record['run_id']}-unseal"
     evaluator = MofScreeningEvaluator(
         pool=pool, labels=labels, runner_script=runner_script,
-        workdir_root=workdir_root / f"{record['run_id']}-unseal", k=K,
+        workdir_root=workdir, k=K,
     )
-    candidate_dir = Path(final["source_path"]).parent
-    verdict = evaluator.evaluate(candidate_dir, invocation_id=f"{record['run_id']}-final")
-
-    agreement: list[bool] = []
-    base_ids: list[str] | None = None
-    if verdict.status.value == "SUCCESS" or verdict.score > 0.0:
-        base_ids = list(verdict.detail.get("ranking") or [])
-        agreement = _permutation_agreement(
-            pool=pool, labels=labels, runner_script=runner_script,
-            workdir_root=workdir_root, candidate_dir=candidate_dir,
-            run_id=str(record["run_id"]), expected=base_ids, permutations=permutations,
-        )
-
-    ranking = list(verdict.detail.get("ranking") or [])
-    recommended = [float(v) for v in verdict.detail.get("recommended_uptakes") or []]
-    top = [float(v) for v in verdict.detail.get("top_k_uptakes") or []]
     cutoff = _high_performer_cutoff(len(labels))
     threshold = sorted(labels.values(), reverse=True)[cutoff - 1] if labels else 0.0
-    hits = sum(1 for value in recommended if value >= threshold)
+    # The final candidate is identified by *which checkpoint chose it*, not by
+    # its content: a search that improves nothing freezes the same file at every
+    # checkpoint, and a content match would then mark all of them as final and
+    # put four "A"s into one paired run's row.
+    final_checkpoint = int(final["checkpoint"]) if final else -1
 
-    return UnsealResult(
-        run_id=str(record["run_id"]), method=str(plan["method"]),
-        split_seed=split_seed, repeat=int(plan["repeat"]),
-        origin=str(final["origin"]), candidate_sha256=str(final["candidate_sha256"]),
-        development_S=float(final["development_S"]),
-        test_S=float(verdict.score),
-        test_Q=float(verdict.detail.get("Q") or 0.0),
-        test_Q_star=float(verdict.detail.get("Q_star") or 0.0),
-        recommended_uptakes=recommended, top_k_uptakes=top,
-        high_performer_hits=hits, high_performer_cutoff=cutoff,
-        contract_status=str(verdict.public_detail.get("contract_status", "")),
-        error_type=verdict.error_type, duration_s=float(verdict.duration_s),
-        permutation_agreement=agreement,
-    )
+    results: list[UnsealResult] = []
+    for entry in frozen:
+        candidate_dir = Path(entry["source_path"]).parent
+        checkpoint = int(entry["checkpoint"])
+        verdict = evaluator.evaluate(
+            candidate_dir, invocation_id=f"{record['run_id']}-c{checkpoint}")
+        recommended = [float(v) for v in verdict.detail.get("recommended_uptakes") or []]
+        is_final = checkpoint == final_checkpoint
+        agreement: list[bool] = []
+        if is_final and (verdict.status.value == "SUCCESS" or verdict.score > 0.0):
+            agreement = _permutation_agreement(
+                pool=pool, labels=labels, runner_script=runner_script,
+                workdir_root=workdir_root, candidate_dir=candidate_dir,
+                run_id=str(record["run_id"]),
+                expected=list(verdict.detail.get("ranking") or []),
+                permutations=permutations,
+            )
+        results.append(UnsealResult(
+            run_id=str(record["run_id"]), method=str(plan["method"]),
+            split_seed=split_seed, repeat=int(plan["repeat"]),
+            checkpoint=checkpoint, is_final=is_final,
+            origin=str(entry["origin"]), candidate_sha256=str(entry["candidate_sha256"]),
+            development_S=float(entry["development_S"]),
+            test_S=float(verdict.score),
+            test_Q=float(verdict.detail.get("Q") or 0.0),
+            test_Q_star=float(verdict.detail.get("Q_star") or 0.0),
+            recommended_uptakes=recommended,
+            top_k_uptakes=[float(v) for v in verdict.detail.get("top_k_uptakes") or []],
+            high_performer_hits=sum(1 for value in recommended if value >= threshold),
+            high_performer_cutoff=cutoff,
+            contract_status=str(verdict.public_detail.get("contract_status", "")),
+            error_type=verdict.error_type, duration_s=float(verdict.duration_s),
+            permutation_agreement=agreement,
+        ))
+    return results
 
 
 def _permutation_agreement(
@@ -241,6 +271,12 @@ def paired_table(
     """Group unsealed runs into the block-level paired table the design asks for."""
     by_block: dict[tuple[int, int], dict[str, UnsealResult]] = {}
     for result in unsealed:
+        # One row per arm: the candidate the arm is actually judged on. The
+        # checkpoint candidates appear in the curve, not in this table, or a
+        # block would contribute several "A"s and the paired difference would
+        # no longer be one number per paired run.
+        if not result.is_final:
+            continue
         by_block.setdefault((result.split_seed, result.repeat), {})[result.method] = result
     rows: list[dict[str, Any]] = []
     for (split_seed, repeat), arms in sorted(by_block.items()):
@@ -284,7 +320,7 @@ def development_test_gap(unsealed: Sequence[UnsealResult]) -> dict[str, Any]:
     """How much of each arm's development score survives contact with the pool."""
     out: dict[str, Any] = {}
     for method in ("A", "B", "C"):
-        rows = [r for r in unsealed if r.method == method]
+        rows = [r for r in unsealed if r.method == method and r.is_final]
         if not rows:
             continue
         dev = [r.development_S for r in rows]

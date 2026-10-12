@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+import shutil
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,35 @@ BASELINE = Path("tasks/mof_screening/initial")
 pytestmark = pytest.mark.skipif(
     not PREPARED.is_dir(), reason="prepared CRAFTED splits are not present in .runtime"
 )
+
+
+@pytest.fixture(scope="session")
+def split_101(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A private copy of split 101's mounted files.
+
+    A live phase deliberately takes the held-out files off disk, so a test that
+    read them from `.runtime` would fail for the whole duration of a real run --
+    and would be testing the vault's schedule rather than the grader. The split
+    is three small CSVs; copying them costs nothing and makes the suite
+    independent of whether a search is in flight.
+    """
+    source = PREPARED / "splits" / "101"
+    destination = tmp_path_factory.mktemp("split-101")
+    if not (source / "evaluator_private").is_dir():
+        pytest.skip("split 101 is sealed by a running phase; re-run after it releases")
+    shutil.copytree(source / "agent", destination / "agent")
+    shutil.copytree(source / "evaluator_private", destination / "evaluator_private")
+    return destination
+
+
+def _pool_from(copy_root: Path, label: str) -> MofPool:
+    return MofPool(
+        label=label,
+        train_features=copy_root / "agent" / "train_features.csv",
+        train_targets=copy_root / "agent" / "train_targets.csv",
+        pool_features=copy_root / "agent" / "dev_features.csv",
+        private_targets=copy_root / "evaluator_private" / "dev_targets.private.csv",
+    )
 
 
 # --------------------------------------------------------------------- protocol
@@ -95,8 +125,8 @@ def test_score_ranking_uses_ids_to_break_ties() -> None:
     assert s == pytest.approx(1.0)
 
 
-def test_grader_scores_the_baseline_and_reports_failures_distinctly() -> None:
-    pool = MofPool.development(PREPARED, 101)
+def test_grader_scores_the_baseline_and_reports_failures_distinctly(split_101: Path) -> None:
+    pool = _pool_from(split_101, "development-101")
     evaluator = MofScreeningEvaluator(
         pool=pool, labels=pool.load_labels(), runner_script=RUNNER,
         workdir_root=Path(".runtime/pytest-mof/eval"), k=10,
@@ -130,12 +160,12 @@ def test_grader_scores_the_baseline_and_reports_failures_distinctly() -> None:
     assert dup.status.value == "FAILED" and dup.error_type == "DUPLICATE_ID"
 
 
-def test_grader_is_indifferent_to_pool_row_order() -> None:
+def test_grader_is_indifferent_to_pool_row_order(split_101: Path) -> None:
     """The baseline must return the same set when the pool rows are reshuffled."""
     import csv
     import random
 
-    pool = MofPool.development(PREPARED, 101)
+    pool = _pool_from(split_101, "development-101")
     labels = pool.load_labels()
     base = MofScreeningEvaluator(pool=pool, labels=labels, runner_script=RUNNER,
                                  workdir_root=Path(".runtime/pytest-mof/order"), k=10)
@@ -241,7 +271,9 @@ class _ScriptedMofBackend:
         )
 
 
-def test_block_pipeline_records_ledger_findings_and_freezing(tmp_path: Path) -> None:
+def test_block_pipeline_records_ledger_findings_and_freezing(
+    tmp_path: Path, split_101: Path,
+) -> None:
     from dream_rsi.mof.experiment import MofExperimentRunner
 
     spec = PhaseSpec(
@@ -276,7 +308,8 @@ def test_block_pipeline_records_ledger_findings_and_freezing(tmp_path: Path) -> 
     )
     plan = block_plans("pilot")[0]
     plan = replace(plan, phase="pilot")
-    record = runner.run_block(plan, labels=MofPool.development(PREPARED, 101).load_labels())
+    record = runner.run_block(plan, labels=_pool_from(split_101, "dev-101").load_labels(),
+                              pool_digest=_pool_from(split_101, "dev-101").data_digest())
 
     assert record.run_id.startswith("acceptance-")
     assert record.status in ("COMMITTED", "FAILED"), record.error
@@ -296,3 +329,84 @@ def test_block_pipeline_records_ledger_findings_and_freezing(tmp_path: Path) -> 
     # Every checkpoint freezes something, and the pick never scores below the start.
     assert len(record.frozen) == len(spec.checkpoints)
     assert all(c["development_S"] >= record.baseline_S for c in record.frozen)
+
+
+# -------------------------------------------------------------------- figures
+
+
+def test_every_figure_renders_with_its_source_data(tmp_path: Path) -> None:
+    """Five figures, each with a PNG, an SVG and the CSV behind it.
+
+    The report is a deliverable, not a side effect, so it gets a test that fails
+    when a figure stops rendering rather than being discovered after a phase has
+    already run. The numbers here are synthetic: this checks the plumbing, and
+    nothing in it is a result.
+    """
+    from dream_rsi.mof import figures
+    from dream_rsi.mof.analysis import UnsealResult, paired_table
+
+    blocks = [{
+        "run_id": f"mof-pilot-s101-r1-{method}",
+        "plan": {"method": method, "split_seed": 101, "repeat": 1, "block_id": "b"},
+        "baseline_S": 0.58,
+        "findings": [{"cumulative": (index + 1) * 5300, "score": 0.58 + 0.02 * index,
+                      "outer_t": index // 6, "round_index": index % 6,
+                      "ledger_seq": index + 1, "charged": 5300} for index in range(12)],
+        "worlds": [{"outer_t": t, "s_best": 0.6 + 0.02 * t, "b_count": 5,
+                    "state": "SEALED_SCOREABLE", "node_count": 6, "world_digest": "x",
+                    "policy_version_id": "p", "replay_worlds_available": 0} for t in range(2)],
+    } for method in ("A", "B", "C")]
+
+    unsealed = [
+        UnsealResult(
+            run_id=f"r-{method}-{seed}-{repeat}", method=method, split_seed=seed,
+            repeat=repeat, checkpoint=5_000_000, is_final=True, origin="baseline",
+            candidate_sha256=f"{method}{seed}{repeat}", development_S=0.7,
+            test_S=0.7 if method != "A" else 0.74, test_Q=5.2, test_Q_star=7.5,
+            recommended_uptakes=[5.2] * 10, top_k_uptakes=[7.5] * 10,
+            high_performer_hits=4, high_performer_cutoff=14, contract_status="OK",
+            error_type=None, duration_s=3.0, permutation_agreement=[True] * 3,
+        )
+        for method in ("A", "B", "C") for seed in (101, 211) for repeat in (1, 2)
+    ]
+    table = paired_table(unsealed)
+    out = tmp_path / "figures"
+
+    produced = {
+        "staircase": figures.quality_budget_staircase(blocks, out),
+        "dynamics": figures.recursive_dynamics(
+            [{"split_seed": row.split_seed, "method": row.method, "repeat": row.repeat,
+              "run_id": row.run_id, "points": [{"checkpoint": row.checkpoint,
+                                                "test_S": row.test_S, "test_Q": row.test_Q,
+                                                "development_S": row.development_S,
+                                                "origin": row.origin}]} for row in unsealed],
+            out),
+        "paired": figures.paired_final_comparison(table, out),
+        "recommendation": figures.recommendation_explanation(
+            [row.to_dict() for row in unsealed],
+            {"random": {"mean_S": 0.43}, "ridge": {"Q": 4.9}, "random_forest": {"Q": 5.8}}, out),
+        "mechanism": figures.internal_mechanism(blocks, out),
+    }
+    for name, paths in produced.items():
+        for kind in ("png", "svg", "csv"):
+            assert Path(paths[kind]).is_file(), f"{name} has no {kind}"
+            assert Path(paths[kind]).stat().st_size > 0, f"{name} {kind} is empty"
+
+
+def test_paired_table_uses_one_candidate_per_run(tmp_path: Path) -> None:
+    """Checkpoint candidates belong in the curve, not in the paired difference."""
+    from dream_rsi.mof.analysis import UnsealResult, paired_table
+
+    def row(checkpoint: int, is_final: bool, test_S: float) -> UnsealResult:
+        return UnsealResult(
+            run_id="r", method="A", split_seed=101, repeat=1, checkpoint=checkpoint,
+            is_final=is_final, origin="baseline", candidate_sha256=f"c{checkpoint}",
+            development_S=0.5, test_S=test_S, test_Q=1.0, test_Q_star=2.0,
+            recommended_uptakes=[1.0], top_k_uptakes=[2.0], high_performer_hits=0,
+            high_performer_cutoff=1, contract_status="OK", error_type=None,
+            duration_s=1.0, permutation_agreement=[],
+        )
+
+    table = paired_table([row(500_000, False, 0.10), row(5_000_000, True, 0.80)])
+    assert len(table["rows"]) == 1
+    assert table["rows"][0]["A_test_S"] == pytest.approx(0.80)

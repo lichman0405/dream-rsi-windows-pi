@@ -13,7 +13,7 @@ import platform
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -253,6 +253,19 @@ def cmd_mof_run(args: Any) -> int:
 # --------------------------------------------------------------------- unseal
 
 
+def _latest_blocks(path: Path) -> list[dict[str, Any]]:
+    """One record per arm-run: the last one written.
+
+    A resumed phase appends another line for a block it continued, and the later
+    line is the one carrying the completed tree and the full ledger. Deduping by
+    run id keeps a re-run from unsealing the same candidate twice.
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    for row in load_jsonl(path):
+        latest[str(row.get("run_id", ""))] = row
+    return list(latest.values())
+
+
 def _unseal_dir(project_root: Path, phase: str) -> Path:
     return project_root / OUT_DIR / phase / "unsealed"
 
@@ -262,7 +275,7 @@ def cmd_mof_unseal(args: Any) -> int:
     project_root = Path(args.project_root).resolve()
     prepared = _prepared(project_root)
     runner_script = project_root / "tasks" / "mof_screening" / "candidate_runner.py"
-    records = load_jsonl(project_root / OUT_DIR / args.phase / f"{args.phase}-blocks.jsonl")
+    records = _latest_blocks(project_root / OUT_DIR / args.phase / f"{args.phase}-blocks.jsonl")
     if not records:
         _status("FAILED", reason=f"no block records under {OUT_DIR / args.phase}")
         return 1
@@ -272,14 +285,14 @@ def cmd_mof_unseal(args: Any) -> int:
         if record.get("status") != "COMMITTED" and not record.get("final_candidate"):
             continue
         try:
-            verdict = unseal_block(
+            verdicts = unseal_block(
                 record=record, prepared_root=prepared, runner_script=runner_script,
                 workdir_root=target / "work",
             )
         except Exception as exc:  # noqa: BLE001 - a failed unseal is a recorded outcome
             results.append({"run_id": record["run_id"], "error": f"{type(exc).__name__}: {exc}"})
             continue
-        results.append(verdict.to_dict())
+        results.extend(verdict.to_dict() for verdict in verdicts)
     write_json(target / "unsealed.json", results)
 
     # The references use the same sealed pool, so they are computed here and
@@ -311,7 +324,7 @@ def cmd_mof_report(args: Any) -> int:
     phase_dir = project_root / OUT_DIR / args.phase
     target = _unseal_dir(project_root, args.phase)
     fig_dir = target / "figures"
-    blocks = load_jsonl(phase_dir / f"{args.phase}-blocks.jsonl")
+    blocks = _latest_blocks(phase_dir / f"{args.phase}-blocks.jsonl")
     unsealed = _load_unsealed(target) if (target / "unsealed.json").is_file() else []
     references = (json.loads((target / "references.json").read_text(encoding="utf-8"))
                   if (target / "references.json").is_file() else {})
@@ -326,20 +339,17 @@ def cmd_mof_report(args: Any) -> int:
         checkpoints = _checkpoint_series(blocks, unsealed)
         figures["recursive_dynamics"] = recursive_dynamics(checkpoints, fig_dir)
         figures["paired_final_comparison"] = paired_final_comparison(table, fig_dir)
-        merged_references: dict[str, Any] = {}
-        for split_seed, block in references.items():
-            for key, value in block.items():
-                if isinstance(value, dict) and key not in ("pore_volume",):
-                    merged_references.setdefault(key, value)
         figures["recommendation_explanation"] = recommendation_explanation(
-            [row.to_dict() for row in unsealed], merged_references, fig_dir)
+            [row.to_dict() for row in unsealed if row.is_final],
+            _average_references(references), fig_dir)
 
     report = {
         "phase": args.phase,
         "protocol_digest": blocks[0]["protocol_digest"] if blocks else None,
         "blocks": len(blocks),
         "arm_runs": len(blocks),
-        "unsealed": len(unsealed),
+        "unsealed": sum(1 for row in unsealed if row.is_final),
+        "unsealed_checkpoint_candidates": len(unsealed),
         "paired": table,
         "gap": development_test_gap(unsealed) if unsealed else {},
         "references": references,
@@ -381,6 +391,35 @@ def _checkpoint_series(
                            "method": plan["method"], "run_id": record["run_id"],
                            "points": points})
     return series
+
+
+def _average_references(references: Mapping[str, Any]) -> dict[str, Any]:
+    """Mean the fixed references across the splits' training sets.
+
+    Every split scores the *same* sealed pool but fits its references on its own
+    training set, so there is one reference per split, not one reference. The
+    figure shows the mean of what was actually computed and the report keeps the
+    per-split table; showing a single split would overstate how fixed they are.
+    """
+    keys = ("random", "ridge", "random_forest")
+    out: dict[str, Any] = {}
+    for key in keys:
+        blocks = [value[key] for value in references.values()
+                  if isinstance(value, dict) and key in value]
+        if not blocks:
+            continue
+        merged: dict[str, Any] = {}
+        for name in ("S", "Q", "Q_star", "mean_S"):
+            values = [float(block[name]) for block in blocks if name in block]
+            if values:
+                merged[name] = sum(values) / len(values)
+        merged["splits_averaged"] = len(blocks)
+        out[key] = merged
+    if any("pore_volume" in (value or {}) for value in references.values()):
+        out["pore_volume"] = {"available": False,
+                              "reason": "no accessible-pore-volume column exists in the "
+                                        "pinned CRAFTED 2.0.1 descriptor frame"}
+    return out
 
 
 def _ledger_totals(blocks: Sequence[dict[str, Any]]) -> dict[str, Any]:
