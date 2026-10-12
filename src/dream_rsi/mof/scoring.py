@@ -33,6 +33,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -343,32 +344,16 @@ class MofScreeningEvaluator:
             json.dumps({"k": self.k, "seed": self.pool.payload_seed}), encoding="utf-8"
         )
 
-        timed_out = False
-        argv = [self.python_executable, "-I", str(self.runner_script), str(scratch)]
-        with WindowsJob(memory_limit_mb=self.memory_limit_mb, active_process_limit=4) as job:
-            proc = subprocess.Popen(
-                argv, cwd=str(scratch), env=_runner_env(), stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
-                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-            )
-            job.assign(proc)
-            try:
-                stdout, stderr = proc.communicate(timeout=self.timeout_s)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                terminate_tree(proc, job)
-                try:
-                    stdout, stderr = proc.communicate(timeout=10)
-                except (subprocess.TimeoutExpired, ValueError, OSError):
-                    stdout, stderr = b"", b""
+        timed_out, returncode, stdout, stderr, kill_note = self._run_candidate(scratch)
 
         detail = {
             **base,
             "candidate_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
             "timed_out": timed_out,
-            "runner_returncode": proc.returncode,
+            "runner_returncode": returncode,
             "runner_stdout_bytes": len(stdout),
             "runner_stderr_tail": stderr[-1500:].decode("utf-8", "replace"),
+            "kill_note": kill_note,
         }
         if timed_out:
             return self._failure(detail, started, "TIMEOUT",
@@ -423,6 +408,65 @@ class MofScreeningEvaluator:
         )
 
     # ------------------------------------------------------------------ helpers
+
+    def _run_candidate(
+        self, scratch: Path,
+    ) -> tuple[bool, int | None, bytes, bytes, str]:
+        """Run the candidate process under a deadline it cannot outlive.
+
+        The first version of this used ``communicate(timeout=...)`` with pipes,
+        and a candidate that spawns worker processes walked straight through it:
+        the grandchildren inherit the pipe handles, the read never reaches EOF,
+        and the deadline stops bounding anything. One frozen candidate ran for
+        fifty-six minutes of CPU that way, with the whole unseal pass waiting on
+        it, while the ceiling said 120 seconds.
+
+        So the child's streams go to *files* rather than pipes -- there is no
+        handle for a grandchild to hold open -- and the deadline is enforced by
+        an independent watchdog that kills the process tree, not by the read
+        loop. ``wait`` is then bounded and the diagnostics are read back from
+        disk, so a timed-out candidate still explains itself.
+        """
+        stdout_path = scratch / "runner.stdout.txt"
+        stderr_path = scratch / "runner.stderr.txt"
+        argv = [self.python_executable, "-I", str(self.runner_script), str(scratch)]
+        timed_out = False
+        note = ""
+        returncode: int | None = None
+        proc: subprocess.Popen[bytes] | None = None
+
+        with WindowsJob(memory_limit_mb=self.memory_limit_mb, active_process_limit=4) as job:
+            with stdout_path.open("wb") as out_handle, stderr_path.open("wb") as err_handle:
+                proc = subprocess.Popen(
+                    argv, cwd=str(scratch), env=_runner_env(), stdin=subprocess.DEVNULL,
+                    stdout=out_handle, stderr=err_handle, shell=False,
+                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                )
+                job.assign(proc)
+                watchdog = threading.Timer(
+                    self.timeout_s + 5.0, terminate_tree, args=(proc, job)
+                )
+                watchdog.daemon = True
+                watchdog.start()
+                try:
+                    proc.wait(timeout=self.timeout_s)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                finally:
+                    # Kill on the deadline whether or not `wait` raised: a
+                    # deadline that only holds when the process cooperates is
+                    # not a deadline.
+                    terminate_tree(proc, job)
+                    watchdog.cancel()
+                    try:
+                        returncode = proc.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        note = "process tree survived terminate_tree; handle leaked"
+                        returncode = proc.poll()
+
+        stdout = stdout_path.read_bytes() if stdout_path.exists() else b""
+        stderr = stderr_path.read_bytes() if stderr_path.exists() else b""
+        return timed_out, returncode, stdout, stderr, note
 
     def _contract_problem(self, ids: Any) -> tuple[str, str] | None:
         if not isinstance(ids, list):
