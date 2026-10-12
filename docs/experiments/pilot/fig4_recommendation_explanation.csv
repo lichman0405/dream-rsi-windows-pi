@@ -1,0 +1,16 @@
+group,kind,mean_uptake,n
+A,arm_recommendation,7.61258253,10
+A,arm_recommendation,7.086309129999999,10
+A,arm_recommendation,7.750348149999999,10
+A,arm_recommendation,7.79125787,10
+B,arm_recommendation,7.644277839999999,10
+B,arm_recommendation,7.65941124,10
+B,arm_recommendation,7.56910104,10
+B,arm_recommendation,7.783728089999999,10
+C,arm_recommendation,6.29089851,10
+C,arm_recommendation,7.003730589999999,10
+C,arm_recommendation,6.74939268,10
+C,arm_recommendation,7.47086487,10
+random order,reference,nan,10
+fixed ridge,reference,6.9502989500000005,10
+fixed random forest,reference,7.938804384999999,10

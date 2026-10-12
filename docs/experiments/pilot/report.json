@@ -1,0 +1,287 @@
+{
+  "arm_runs": 12,
+  "blocks": 12,
+  "figures": {
+    "internal_mechanism": {
+      "csv": "docs/experiments/pilot/fig5_internal_mechanism.csv",
+      "png": "docs/experiments/pilot/fig5_internal_mechanism.png",
+      "svg": "docs/experiments/pilot/fig5_internal_mechanism.svg"
+    },
+    "paired_final_comparison": {
+      "csv": "docs/experiments/pilot/fig3_paired_final_comparison.csv",
+      "png": "docs/experiments/pilot/fig3_paired_final_comparison.png",
+      "svg": "docs/experiments/pilot/fig3_paired_final_comparison.svg"
+    },
+    "quality_budget_staircase": {
+      "csv": "docs/experiments/pilot/fig1_quality_budget_staircase.csv",
+      "png": "docs/experiments/pilot/fig1_quality_budget_staircase.png",
+      "svg": "docs/experiments/pilot/fig1_quality_budget_staircase.svg"
+    },
+    "recommendation_explanation": {
+      "csv": "docs/experiments/pilot/fig4_recommendation_explanation.csv",
+      "png": "docs/experiments/pilot/fig4_recommendation_explanation.png",
+      "svg": "docs/experiments/pilot/fig4_recommendation_explanation.svg"
+    },
+    "recursive_dynamics": {
+      "csv": "docs/experiments/pilot/fig2_recursive_dynamics.csv",
+      "png": "docs/experiments/pilot/fig2_recursive_dynamics.png",
+      "svg": "docs/experiments/pilot/fig2_recursive_dynamics.svg"
+    }
+  },
+  "gap": {
+    "A": {
+      "failures": 0,
+      "mean_development_S": 0.8222786326578481,
+      "mean_gap": -0.012722243614761097,
+      "mean_test_S": 0.8350008762726091,
+      "n": 4
+    },
+    "B": {
+      "failures": 0,
+      "mean_development_S": 0.8057400469720041,
+      "mean_gap": -0.04074799167383339,
+      "mean_test_S": 0.8464880386458375,
+      "n": 4
+    },
+    "C": {
+      "failures": 0,
+      "mean_development_S": 0.8156900122376345,
+      "mean_gap": 0.055948730648663125,
+      "mean_test_S": 0.7597412815889714,
+      "n": 4
+    }
+  },
+  "ledger": {
+    "charged_total": 17414177,
+    "cost": {
+      "amount": null,
+      "blocks_with_cost": 0,
+      "known": false,
+      "note": "the service reports no per-request cost on this provider; the report gives tokens and says the money figure is unknown"
+    },
+    "refusals": 0,
+    "requests": 1091,
+    "requests_without_reported_usage": 0,
+    "tokens": {
+      "cache_read": 418176,
+      "cache_write": 0,
+      "input": 13643823,
+      "output": 3352178,
+      "reasoning": 0
+    }
+  },
+  "paired": {
+    "A_minus_B": {
+      "available": true,
+      "ci95": [
+        -0.033399342895167106,
+        0.010425018148710441
+      ],
+      "consistent_direction": 1,
+      "draws": 10000,
+      "max": 0.010425018148710441,
+      "mean": -0.011487162373228332,
+      "median": -0.011487162373228332,
+      "min": -0.033399342895167106,
+      "per_split_mean": {
+        "101": -0.033399342895167106,
+        "211": 0.010425018148710441
+      },
+      "splits": [
+        101,
+        211
+      ]
+    },
+    "A_minus_B_verdict": {
+      "ci95": [
+        -0.033399342895167106,
+        0.010425018148710441
+      ],
+      "crosses_zero": true,
+      "mean": -0.011487162373228332,
+      "practical_threshold": 0.05,
+      "rules": "pre-registered: A-B >= 0.05 S units, same direction in >= 4/5 splits, and an exploratory interval that does not cross 0",
+      "splits_favouring_A": 1,
+      "splits_total": 2,
+      "verdict": "insufficient_evidence"
+    },
+    "A_minus_C": {
+      "available": true,
+      "ci95": [
+        0.07297017013322321,
+        0.07754901923405239
+      ],
+      "consistent_direction": 2,
+      "draws": 10000,
+      "max": 0.07754901923405239,
+      "mean": 0.0752595946836378,
+      "median": 0.0752595946836378,
+      "min": 0.07297017013322321,
+      "per_split_mean": {
+        "101": 0.07754901923405239,
+        "211": 0.07297017013322321
+      },
+      "splits": [
+        101,
+        211
+      ]
+    },
+    "A_minus_C_verdict": {
+      "ci95": [
+        0.07297017013322321,
+        0.07754901923405239
+      ],
+      "crosses_zero": false,
+      "mean": 0.0752595946836378,
+      "practical_threshold": 0.05,
+      "rules": "pre-registered: A-B >= 0.05 S units, same direction in >= 4/5 splits, and an exploratory interval that does not cross 0",
+      "splits_favouring_A": 2,
+      "splits_total": 2,
+      "verdict": "below_practical_threshold"
+    },
+    "blocks": 4,
+    "complete_blocks": 4,
+    "rows": [
+      {
+        "A_dev_S": 0.754900042182108,
+        "A_minus_B": -0.00350068466515141,
+        "A_minus_B_Q": -0.03169530999999903,
+        "A_minus_C": 0.14597740110413493,
+        "A_origin": "node-5ff5acfe7b3c4101b2081dcf2f6dbdae",
+        "A_test_Q": 7.61258253,
+        "A_test_S": 0.8407947713706485,
+        "B_dev_S": 0.7143729362844079,
+        "B_origin": "node-661a6df5623744ffabaac6dc5b07de0e",
+        "B_test_Q": 7.644277839999999,
+        "B_test_S": 0.8442954560357999,
+        "C_dev_S": 0.7678255175473435,
+        "C_origin": "node-be6c773cdcb24f448e07d90afb5b64c9",
+        "C_test_Q": 6.29089851,
+        "C_test_S": 0.6948173702665136,
+        "complete": true,
+        "repeat": 1,
+        "split_seed": 101
+      },
+      {
+        "A_dev_S": 0.7368846492842945,
+        "A_minus_B": -0.0632980011251828,
+        "A_minus_B_Q": -0.5731021100000007,
+        "A_minus_C": 0.009120637363969841,
+        "A_origin": "node-a3f78b411e424294a2a933bb83c1c753",
+        "A_test_Q": 7.086309129999999,
+        "A_test_S": 0.7826689091829245,
+        "B_dev_S": 0.754900042182108,
+        "B_origin": "node-fa0ab585ddf1488eba6525ecd3d0cb32",
+        "B_test_Q": 7.65941124,
+        "B_test_S": 0.8459669103081073,
+        "C_dev_S": 0.723241118062611,
+        "C_origin": "node-00792e5348f747108c554e5bd3ffb812",
+        "C_test_Q": 7.003730589999999,
+        "C_test_S": 0.7735482718189547,
+        "complete": true,
+        "repeat": 2,
+        "split_seed": 101
+      },
+      {
+        "A_dev_S": 0.8874253614128242,
+        "A_minus_B": 0.020018386902669216,
+        "A_minus_B_Q": 0.18124710999999927,
+        "A_minus_C": 0.1105535634240079,
+        "A_origin": "node-36e6dc2b9b8b44b585b1f0a62925ec28",
+        "A_test_Q": 7.750348149999999,
+        "A_test_S": 0.8560107132030236,
+        "B_dev_S": 0.869105735857227,
+        "B_origin": "node-6be8a59aaa9b4a5dae05a84bd127a1f3",
+        "B_test_Q": 7.56910104,
+        "B_test_S": 0.8359923263003544,
+        "C_dev_S": 0.9025876774833564,
+        "C_origin": "node-840a7a7acb264b86b6c11d93fedf184f",
+        "C_test_Q": 6.74939268,
+        "C_test_S": 0.7454571497790157,
+        "complete": true,
+        "repeat": 1,
+        "split_seed": 211
+      },
+      {
+        "A_dev_S": 0.9099044777521654,
+        "A_minus_B": 0.0008316493947516657,
+        "A_minus_B_Q": 0.0075297800000004855,
+        "A_minus_C": 0.035386776842438517,
+        "A_origin": "node-caaf899db07d449aa228003246c4ae92",
+        "A_test_Q": 7.79125787,
+        "A_test_S": 0.86052911133384,
+        "B_dev_S": 0.8845814735642735,
+        "B_origin": "node-6714911b6e27480d841bb321bd34dd30",
+        "B_test_Q": 7.783728089999999,
+        "B_test_S": 0.8596974619390884,
+        "C_dev_S": 0.869105735857227,
+        "C_origin": "node-c5f858e393a146af8d156d5e017e0322",
+        "C_test_Q": 7.47086487,
+        "C_test_S": 0.8251423344914015,
+        "complete": true,
+        "repeat": 2,
+        "split_seed": 211
+      }
+    ]
+  },
+  "phase": "pilot",
+  "protocol_digest": "9f5940ed36ffbedf3b4ce3a6f43a4d65ee07435df1a4727f15e6c9620430b0f8",
+  "references": {
+    "101": {
+      "k": 10,
+      "pool_materials": 197,
+      "pore_volume": {
+        "available": false,
+        "reason": "the pinned CRAFTED 2.0.1 descriptor frame carries the RAC families only; no accessible-pore-volume column exists in the frozen inputs"
+      },
+      "random": {
+        "draws": 100,
+        "max_S": 0.6044623322790832,
+        "mean_S": 0.40088211284729175,
+        "min_S": 0.23683895598280494,
+        "sd_S": 0.0827341295647996
+      },
+      "random_forest": {
+        "Q": 8.16831938,
+        "Q_star": 9.054031720000001,
+        "S": 0.9021748136751612,
+        "mean_recommended_uptake": 8.16831938
+      },
+      "ridge": {
+        "Q": 6.876533820000001,
+        "Q_star": 9.054031720000001,
+        "S": 0.7594996386869296,
+        "mean_recommended_uptake": 6.876533820000001
+      }
+    },
+    "211": {
+      "k": 10,
+      "pool_materials": 197,
+      "pore_volume": {
+        "available": false,
+        "reason": "the pinned CRAFTED 2.0.1 descriptor frame carries the RAC families only; no accessible-pore-volume column exists in the frozen inputs"
+      },
+      "random": {
+        "draws": 100,
+        "max_S": 0.6044623322790832,
+        "mean_S": 0.40088211284729175,
+        "min_S": 0.23683895598280494,
+        "sd_S": 0.0827341295647996
+      },
+      "random_forest": {
+        "Q": 7.7092893899999995,
+        "Q_star": 9.054031720000001,
+        "S": 0.8514758538972733,
+        "mean_recommended_uptake": 7.7092893899999995
+      },
+      "ridge": {
+        "Q": 7.02406408,
+        "Q_star": 9.054031720000001,
+        "S": 0.7757940658065199,
+        "mean_recommended_uptake": 7.02406408
+      }
+    }
+  },
+  "unsealed": 12,
+  "unsealed_checkpoint_candidates": 48
+}

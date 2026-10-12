@@ -230,13 +230,15 @@ def paired_final_comparison(
         right.set_xlim(-0.5, 0.6)
         right.set_xticks([0, 0.32])
         right.set_xticklabels(["mean", "per split"], fontsize=8)
-    right.set_ylabel("$A - B$  (sealed-pool $S$)")
+    right.set_ylabel("$A - B$  (sealed-pool $S$)", fontsize=8)
     right.grid(alpha=0.25, linewidth=0.6)
+    right.tick_params(labelsize=8)
     right.set_title("Paired difference, exploratory 95%", fontsize=10)
     _caption(fig, "Left: one point per paired run, grey lines pair A with B inside a block. "
-                  "Right: the cluster bootstrap resamples whole splits, keeping a split's "
-                  "repeats together; the interval is exploratory, over five splits sharing one "
-                  "sealed pool, and is not a claim about MOFs in general.")
+                  f"Right: the cluster bootstrap resamples whole splits, keeping a split's "
+                  f"repeats together; the interval is exploratory, over the {len(seeds)} "
+                  "split(s) this phase ran, which share one sealed pool. It is not a claim "
+                  "about MOFs in general.")
     return _save(fig, out_dir, "fig3_paired_final_comparison", rows)
 
 
