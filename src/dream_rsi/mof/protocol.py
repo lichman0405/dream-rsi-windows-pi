@@ -52,6 +52,29 @@ DATASET = {
 #: run can honestly claim.
 MODEL = {"provider": "cc-switch-deep-seek", "model": "deepseek-v4-pro"}
 
+#: Extended reasoning, fixed to ``off`` for every call in every arm.
+#:
+#: This is a *service parameter*, and the design requires it to be recorded and
+#: identical across arms, which it is. It was fixed after probe calls on this
+#: machine, before any experimental result existed, because the measured spread
+#: between settings is the difference between a runnable protocol and an
+#: unaffordable one:
+#:
+#: ===========  ==========  ==============  =============
+#: setting      wall clock  total tokens    reasoning tok
+#: ===========  ==========  ==============  =============
+#: service      626 s       (not recorded)  ~33 000
+#: ``low``      527 s       34 107          29 207
+#: ``minimal``  642 s       42 844          36 761
+#: ``off``       35 s        5 310               0
+#: ===========  ==========  ==============  =============
+#:
+#: The lower settings did not lower anything: only ``off`` stops the model
+#: reasoning, and it was also the only one that returned a complete file. All
+#: three arms use this same setting, so the comparison the experiment is about
+#: -- learned policy against frozen policy -- is unaffected.
+THINKING = "off"
+
 #: The score's K, from §3.4 of the design.
 K = 10
 
@@ -235,6 +258,7 @@ class Protocol:
             },
             "dataset": DATASET,
             "model": MODEL,
+            "thinking": THINKING,
             "pi_version": self.pi_version,
             "k": K,
             "candidate_seed": CANDIDATE_SEED,
@@ -272,5 +296,6 @@ __all__ = [
     "K", "LAMBDA_WEIGHT", "LIVE_RHO", "MODEL", "MethodSpec", "PHASES",
     "POLICY_MEMORY_MB", "POLICY_SELECT_TIMEOUT_S", "PRACTICAL_THRESHOLD",
     "PhaseSpec", "Protocol", "RHO_GRID", "ROW_ORDER_PERMUTATIONS", "SPLIT_SEEDS",
+    "THINKING",
     "block_plans", "development_reserve", "method_order",
 ]

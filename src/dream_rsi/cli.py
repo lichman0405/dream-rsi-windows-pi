@@ -579,6 +579,14 @@ def cmd_report(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 
+def _mof(name: str) -> Any:
+    """Resolve a MOF command lazily so importing the CLI stays cheap."""
+    def _run(args: argparse.Namespace) -> int:
+        from .mof import cli as mof_cli
+        return int(getattr(mof_cli, name)(args))
+    return _run
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dream-rsi", description=(__doc__ or "dream-rsi CLI").splitlines()[0])
     parser.add_argument("--project-root", type=Path, default=None)
@@ -641,6 +649,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--provider", default=None)
     p.add_argument("--model", default=None)
     p.set_defaults(func=cmd_model_check)
+
+    p = sub.add_parser(
+        "mof-acceptance",
+        help="check the MOF screening implementation; makes no model call",
+    )
+    p.add_argument("--phase", default="pilot", choices=("pilot", "formal"))
+    p.set_defaults(func=_mof("cmd_mof_acceptance"))
+
+    p = sub.add_parser("mof-run", help="run one phase of the MOF screening experiment")
+    p.add_argument("--phase", default="pilot", choices=("pilot", "formal"))
+    p.add_argument("--only-split-seed", type=int, default=None)
+    p.add_argument("--only-repeat", type=int, default=None)
+    p.add_argument("--block-limit", type=int, default=None,
+                   help="cap the number of paired blocks (each still runs all three arms)")
+    p.add_argument("--no-isolation", action="store_true",
+                   help="skip the search-phase vault; only for an offline rehearsal")
+    p.set_defaults(func=_mof("cmd_mof_run"))
+
+    p = sub.add_parser("mof-unseal", help="open the sealed test pool for frozen candidates")
+    p.add_argument("--phase", default="pilot", choices=("pilot", "formal"))
+    p.set_defaults(func=_mof("cmd_mof_unseal"))
+
+    p = sub.add_parser("mof-report", help="figures, tables and summary.md for a phase")
+    p.add_argument("--phase", default="pilot", choices=("pilot", "formal"))
+    p.set_defaults(func=_mof("cmd_mof_report"))
 
     p = sub.add_parser("report", help="read a finished run back out")
     p.add_argument("--run-id", default=None)

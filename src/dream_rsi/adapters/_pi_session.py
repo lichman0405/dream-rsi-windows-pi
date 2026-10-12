@@ -230,6 +230,14 @@ def _read_token_usage(path: Path) -> tuple[dict[str, int], dict[str, Any] | None
     the service told us nothing, and the call's spend is then *unknown* rather
     than zero. Reasoning tokens and a provider-supplied cost are carried through
     when present; nothing is estimated here.
+
+    Only **completed assistant messages** count. ``message_start`` carries the
+    same usage object for a message that is already finished, and the assistant
+    row is preceded by a zero-filled placeholder on ``message_start``, so a
+    reader that summed every record it found would double the real numbers and
+    a reader that accepted any record at all would take the placeholder as a
+    measurement of zero. The provider here reports usage on ``message_end`` for
+    the assistant role and nothing anywhere else.
     """
     totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
               "reasoning": 0, "total": 0, "reported_messages": 0}
@@ -239,10 +247,19 @@ def _read_token_usage(path: Path) -> tuple[dict[str, int], dict[str, Any] | None
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             try:
-                row = json.loads(line)
-                event = row.get("event", row)
-                message = event.get("message", {}) if isinstance(event, dict) else {}
-                usage = message.get("usage", {}) if isinstance(message, dict) else {}
+                event = json.loads(line).get("event", {})
+                if not isinstance(event, dict) or event.get("type") != "message_end":
+                    continue
+                message = event.get("message") or {}
+                if not isinstance(message, dict):
+                    continue
+                # The role is absent on a record the trace shortened (and on the
+                # assistant row of some providers); a `usage` object is the thing
+                # actually being looked for, and an assistant-only rule would
+                # silently drop exactly the long, expensive replies.
+                if message.get("role") not in (None, "assistant"):
+                    continue
+                usage = message.get("usage")
                 if not isinstance(usage, dict) or not usage:
                     continue
                 fields = {
@@ -261,15 +278,34 @@ def _read_token_usage(path: Path) -> tuple[dict[str, int], dict[str, Any] | None
                 reported = _as_int(usage.get("totalTokens", usage.get("total_tokens")))
                 totals["total"] += reported if reported is not None else counted
                 totals["reported_messages"] += 1
-                for key in ("cost", "costUsd", "totalCost"):
-                    amount = usage.get(key, message.get(key) if isinstance(message, dict) else None)
-                    if isinstance(amount, dict):
-                        amount = amount.get("amount", amount.get("total"))
-                    if amount is not None:
-                        cost = {"amount": amount, "currency": usage.get("currency", "USD")}
+                amount = _positive_cost(usage)
+                if amount is not None:
+                    cost = {"amount": amount, "currency": str(usage.get("currency") or "USD")}
             except (OSError, json.JSONDecodeError, AttributeError):
                 continue
     return totals, cost
+
+
+def _positive_cost(usage: dict[str, Any]) -> float | None:
+    """A money figure only when the service actually charged something.
+
+    Pi reports an all-zero ``cost`` object on every message here, which is a
+    placeholder rather than a measurement. Returning ``None`` for it keeps the
+    ledger saying "the provider reported no cost" instead of "this was free".
+    """
+    total = usage.get("cost")
+    if isinstance(total, dict):
+        total = total.get("total", total.get("amount"))
+    value = None
+    for raw in (total, usage.get("costUsd"), usage.get("totalCost")):
+        try:
+            candidate = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if candidate > 0:
+            value = candidate
+            break
+    return value
 
 
 __all__ = ["PiSessionResult", "pi_child_env", "run_pi_prompt"]

@@ -43,22 +43,46 @@ from ..domain.models import EvaluatorStatus
 from ..evaluator.protocol import EvaluationResult
 from ..runtime.winjob import WindowsJob, terminate_tree
 
-#: Modules a candidate may not import. This is a *rule*, enforced by reading the
-#: candidate's own syntax tree, and it is stated in the task text so a candidate
-#: cannot break it by accident. It is not a sandbox: determined code could reach
-#: the same capabilities by other means, which is why the labels themselves are
-#: off the filesystem while any of this runs (see :mod:`dream_rsi.mof.vault`).
-FORBIDDEN_IMPORTS: frozenset[str] = frozenset({
+#: The only third-party packages a candidate may use, as stated in TASK.md.
+ALLOWED_THIRD_PARTY: frozenset[str] = frozenset({
+    "numpy", "pandas", "sklearn", "scipy", "joblib",
+})
+
+#: Standard-library modules a *ranking program* has a reason to import: pure
+#: computation, typing and small data plumbing. Everything not named here and not
+#: in :data:`ALLOWED_THIRD_PARTY` is refused, so the rule a candidate is given
+#: ("these libraries and no others") is the rule that is enforced, rather than a
+#: denylist that silently permits whatever it forgot to name.
+ALLOWED_STDLIB: frozenset[str] = frozenset({
+    "__future__", "abc", "array", "bisect", "collections", "contextlib", "copy",
+    "dataclasses", "decimal", "enum", "fractions", "functools", "heapq",
+    "itertools", "math", "numbers", "operator", "random", "re", "statistics",
+    "string", "types", "typing", "unittest", "warnings",
+})
+
+#: Capability modules that must never load, whatever route is taken to them.
+#: The static screen below cannot see ``__import__("sock" + "et")``; the runner's
+#: runtime guard can, because it sits on the import machinery itself. This list
+#: is deliberately limited to what a ranking program cannot need and an attacker
+#: would: the network and the ability to reach into another process.
+CAPABILITY_MODULES: frozenset[str] = frozenset({
     "socket", "ssl", "urllib", "http", "requests", "httpx", "aiohttp",
     "ftplib", "smtplib", "telnetlib", "poplib", "imaplib", "xmlrpc",
     "asyncio", "socketserver", "webbrowser",
-    "subprocess", "ctypes", "multiprocessing", "pty", "winreg", "msvcrt",
-    "glob", "tempfile", "shutil", "pickle", "marshal", "shelve", "sqlite3",
-    "distutils", "setuptools", "pip",
+    "subprocess", "ctypes", "_ctypes", "multiprocessing", "pty", "winreg",
+    "msvcrt", "_winapi", "nt", "posix",
 })
 
-#: The only third-party packages a candidate may use, as stated in TASK.md.
-ALLOWED_THIRD_PARTY: frozenset[str] = frozenset({"numpy", "pandas", "sklearn", "scipy", "joblib"})
+#: Kept as the name the task text and earlier code use; the enforced rule is now
+#: the pair of allowlists above plus the runtime guard.
+FORBIDDEN_IMPORTS: frozenset[str] = CAPABILITY_MODULES | frozenset({
+    "glob", "tempfile", "shutil", "pickle", "marshal", "shelve", "sqlite3",
+    "distutils", "setuptools", "pip", "os", "sys", "io", "pathlib", "importlib",
+    "builtins", "runpy", "pkgutil", "inspect", "code", "codeop", "site",
+})
+
+#: Every module name a candidate's own source may import, at top level.
+ALLOWED_IMPORTS: frozenset[str] = ALLOWED_STDLIB | ALLOWED_THIRD_PARTY
 
 ID_COLUMN = "material_id"
 TARGET_COLUMN = "target_mol_kg"
@@ -71,11 +95,21 @@ def _digest(payload: Mapping[str, Any]) -> str:
 
 
 def screen_candidate_source(source: str) -> tuple[str, ...]:
-    """Return the forbidden imports found in a candidate's source, sorted.
+    """Return the imports a candidate's source may not make, sorted.
+
+    This is an **allowlist**, not a denylist. The task text tells a candidate it
+    may use one standard library plus NumPy, pandas and scikit-learn, so the
+    check is "is this one of those", and a module nobody thought to forbid is
+    refused rather than permitted by omission.
 
     A source that does not parse is reported as ``SYNTAX_ERROR`` rather than
     raising: an unparseable candidate is a failed candidate, and the grader has
     to be able to say so.
+
+    The screen reads the syntax tree, so it cannot see ``__import__("sock" +
+    "et")``. That route is closed at run time instead, by the import guard in
+    ``tasks/mof_screening/candidate_runner.py``; the two are complementary and
+    neither is asked to do the other's job.
     """
     try:
         tree = ast.parse(source)
@@ -86,12 +120,18 @@ def screen_candidate_source(source: str) -> tuple[str, ...]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".")[0]
-                if root in FORBIDDEN_IMPORTS:
+                if root not in ALLOWED_IMPORTS:
                     found.add(root)
         elif isinstance(node, ast.ImportFrom):
+            if node.level:  # relative import: nothing legitimate resolves here
+                found.add(".")
+                continue
             root = (node.module or "").split(".")[0]
-            if root in FORBIDDEN_IMPORTS:
+            if root not in ALLOWED_IMPORTS:
                 found.add(root)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in {"__import__", "eval", "exec", "compile", "open"}:
+                found.add(node.func.id)
     return tuple(sorted(found))
 
 

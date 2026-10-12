@@ -252,6 +252,7 @@ class LlmPolicyDeveloper:
         memory_limit_mb: int | None = 4096,
         token_budget: TokenBudget | None = None,
         max_output_bytes: int = 32768,
+        thinking: str | None = None,
     ) -> None:
         if not provider or not model:
             raise ValueError(
@@ -267,6 +268,7 @@ class LlmPolicyDeveloper:
         self.memory_limit_mb = memory_limit_mb
         self.token_budget = token_budget
         self.max_output_bytes = int(max_output_bytes)
+        self.thinking = thinking
         #: One entry per call, kept so a run can report what it actually spent.
         self.sessions: list[dict[str, object]] = []
 
@@ -293,6 +295,7 @@ class LlmPolicyDeveloper:
                 "model": self.model,
                 "prompt": prompt,
                 "no_tools": True,
+                "thinking": self.thinking,
             },
             run_dir=session_dir,
             timeout_s=self.timeout_s,

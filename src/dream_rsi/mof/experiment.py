@@ -43,6 +43,7 @@ from ..policy.runner import SubprocessPolicyRunner
 from ..runtime.token_budget import TokenBudget
 from ..storage.cas import ContentAddressedStore
 from ..storage.sqlite_registry import Registry
+from .vault import FileVault
 from .protocol import (
     AGENT_MEMORY_MB,
     AGENT_TIMEOUT_S,
@@ -55,6 +56,7 @@ from .protocol import (
     MODEL,
     POLICY_MEMORY_MB,
     POLICY_SELECT_TIMEOUT_S,
+    THINKING,
     Protocol,
     development_reserve,
 )
@@ -304,6 +306,7 @@ class MofExperimentRunner:
                 timeout_s=AGENT_TIMEOUT_S, memory_limit_mb=AGENT_MEMORY_MB,
                 no_tools=True, response_only=True, standard_library_only=False,
                 token_budget=budget, max_output_bytes=MAX_OUTPUT_BYTES,
+                thinking=THINKING,
             )
         )
         record.backend_id = str(getattr(backend, "backend_id", "unknown"))
@@ -314,6 +317,7 @@ class MofExperimentRunner:
                 provider=MODEL["provider"], model=MODEL["model"],
                 timeout_s=AGENT_TIMEOUT_S, memory_limit_mb=AGENT_MEMORY_MB,
                 token_budget=budget, max_output_bytes=MAX_OUTPUT_BYTES,
+                thinking=THINKING,
             )
             if method.uses_developer else None
         )
@@ -472,25 +476,60 @@ class MofExperimentRunner:
 
     # ------------------------------------------------------------------ phase
 
-    def run_phase(self, plans: Sequence[BlockPlan]) -> dict[str, Any]:
-        """Run every block, writing one record file per block plus a phase index."""
+    def run_phase(
+        self, plans: Sequence[BlockPlan], *, protect: Sequence[Path] = (),
+    ) -> dict[str, Any]:
+        """Run every block, with the held-out data off disk for the whole phase.
+
+        The labels are read into this process *before* the vault closes, because
+        after that there is nothing on disk to read. That ordering is the whole
+        mechanism: ``seal`` is followed by ``verify_absent``, which really opens
+        every protected path and reports what it found, and the answer is written
+        to the phase record rather than assumed. Release runs in a ``finally``,
+        so an exception or a Ctrl-C still puts the data back.
+        """
         labels_by_split: dict[int, dict[str, float]] = {}
         for plan in plans:
             if plan.split_seed not in labels_by_split:
                 labels_by_split[plan.split_seed] = self._pool(plan.split_seed).load_labels()
 
+        vault = FileVault(manifest_path=self.out_root / "vault-manifest.jsonl")
+        isolation: dict[str, Any] = {}
+        if protect:
+            sealed = vault.seal(protect)
+            verified = vault.verify_absent()
+            isolation = {"sealed": sealed, "verified_absent": verified,
+                         "protected_paths": [str(Path(p)) for p in protect]}
+            if not verified["ok"]:
+                vault.release()
+                raise RuntimeError(
+                    "search-phase isolation failed: "
+                    f"{len(verified['still_readable'])} protected path(s) are still "
+                    "readable after sealing, so the run would be searching with the "
+                    "labels in reach"
+                )
+
         records: list[dict[str, Any]] = []
         index_path = self.out_root / f"{self.protocol.phase}-blocks.jsonl"
-        for plan in plans:
-            record = self.run_block(plan, labels=labels_by_split[plan.split_seed])
-            records.append(record.to_dict())
-            with index_path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps(record.to_dict(), sort_keys=True, default=str) + "\n")
-        return {
+        try:
+            for plan in plans:
+                record = self.run_block(plan, labels=labels_by_split[plan.split_seed])
+                records.append(record.to_dict())
+                with index_path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(json.dumps(record.to_dict(), sort_keys=True, default=str) + "\n")
+        finally:
+            if vault.sealed:
+                isolation["released"] = vault.release()
+                isolation["verified_restored"] = vault.verify_restored()
+
+        summary = {
             "phase": self.protocol.phase,
             "protocol_digest": self.protocol.digest,
+            "isolation": isolation,
             "blocks": records,
         }
+        _write_json(self.out_root / f"{self.protocol.phase}-phase.json", summary)
+        return summary
 
 
 def _best(*, findings: Sequence[Finding], baseline_S: float) -> Finding | None:
@@ -520,7 +559,29 @@ def _write_json(path: Path, payload: Any) -> None:
                     encoding="utf-8")
 
 
+def default_protected_paths(
+    prepared_root: Path, *, dataset_root: Path | None = None,
+    raw_root: Path | None = None,
+) -> list[Path]:
+    """Everything whose presence would let a candidate read the answer.
+
+    Three families, and the third is the one that is easy to forget: the
+    published archive is *public*, so a candidate does not need this machine to
+    obtain it -- but it does need this machine to *join* it to the opaque ids it
+    was given, and that join runs through the descriptor frame. Hiding the labels
+    while leaving the descriptors exposed would be theatre.
+    """
+    prepared = Path(prepared_root)
+    paths: list[Path] = [prepared / "private"]
+    paths.extend(sorted(prepared.glob("splits/*/evaluator_private")))
+    if dataset_root is not None:
+        paths.append(Path(dataset_root))
+    if raw_root is not None:
+        paths.append(Path(raw_root))
+    return [path for path in paths if path.exists()]
+
+
 __all__ = [
     "BlockRecord", "Finding", "FrozenCandidate", "K2", "MAX_OUTPUT_BYTES",
-    "MofExperimentRunner",
+    "MofExperimentRunner", "default_protected_paths",
 ]

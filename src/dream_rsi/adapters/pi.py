@@ -74,6 +74,7 @@ class PiDiscoveryBackend:
         standard_library_only: bool = True,
         token_budget: TokenBudget | None = None,
         max_output_bytes: int = 32768,
+        thinking: str | None = None,
     ) -> None:
         self.workdir_root = Path(workdir_root)
         self.provider = provider
@@ -86,6 +87,7 @@ class PiDiscoveryBackend:
         self.standard_library_only = standard_library_only
         self.token_budget = token_budget
         self.max_output_bytes = int(max_output_bytes)
+        self.thinking = thinking
 
     def preflight(self) -> None:
         if not shutil.which("pi"):
@@ -137,6 +139,7 @@ class PiDiscoveryBackend:
                 # ceiling through makes the two the same number.
                 "settle_s": self.timeout_s,
                 "no_tools": self.no_tools,
+                "thinking": self.thinking,
             },
             run_dir=run_dir,
             # Longer than `settle_s` by a margin, so the child outlives its own

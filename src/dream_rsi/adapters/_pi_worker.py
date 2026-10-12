@@ -146,15 +146,24 @@ class EventTrace:
         text = json.dumps(record, ensure_ascii=False, default=str)
         if len(text) > MAX_TRACE_RECORD_CHARS:
             keep = MAX_TRACE_RECORD_CHARS // 2
-            text = json.dumps(
-                {
-                    "type": record.get("type"),
-                    "trace_truncated_record_chars": len(text),
-                    "head": text[:keep],
-                    "tail": text[-keep:],
-                },
-                ensure_ascii=False,
-            )
+            shortened: dict[str, Any] = {
+                "type": record.get("type"),
+                "trace_truncated_record_chars": len(text),
+                "head": text[:keep],
+                "tail": text[-keep:],
+            }
+            # A long message is exactly the case where the accounting matters
+            # most, and truncation used to throw the whole `message` object away
+            # with it -- so a 140 kB reply lost its usage and the ledger recorded
+            # a paid call as unreported. The small fields survive on their own.
+            message = record.get("message")
+            if isinstance(message, dict):
+                shortened["message"] = {
+                    key: message.get(key)
+                    for key in ("role", "stopReason", "usage", "model", "provider")
+                    if key in message
+                }
+            text = json.dumps(shortened, ensure_ascii=False)
         self._write_line(text)
 
     def _write_line(self, line: str | dict[str, Any]) -> None:
@@ -212,10 +221,16 @@ def run_request(
         # This keeps the worker's authority at the prompt boundary.
         args += [
             "--no-tools", "--no-mcp", "--no-extensions", "--no-skills",
-            "--no-context-files", "--offline",
+            "--no-context-files", "--no-prompt-templates", "--no-themes",
+            "--offline",
         ]
         if request.get("system_prompt"):
             args += ["--system-prompt", str(request["system_prompt"])]
+        if request.get("thinking"):
+            # Recorded on every request: the reasoning setting changes what the
+            # service is asked to do, so an experiment that fixed it in one arm
+            # and not another would not be comparing the same thing.
+            args += ["--thinking", str(request["thinking"])]
     if request.get("provider"):
         args += ["--provider", str(request["provider"])]
     if request.get("model"):
@@ -261,7 +276,12 @@ def run_request(
         inner = record.get("assistantMessageEvent")
         if kind == "message_update" and isinstance(inner, dict):
             delta = inner.get("delta")
-            if isinstance(delta, str):
+            # Only the *deliverable* counts against the ceiling. Thinking deltas
+            # arrive on the same channel with the same shape, and a call cut off
+            # 32 KiB into its reasoning loses the answer it was about to write
+            # while looking, from the outside, exactly like a runaway: the first
+            # live MOF probe died that way, having emitted no text at all.
+            if isinstance(delta, str) and str(inner.get("type", "")) == "text_delta":
                 state["output_bytes"] += len(delta.encode("utf-8"))
                 cap = int(request.get("max_output_bytes") or 0)
                 if cap and state["output_bytes"] > cap and not state["output_limit"]:
