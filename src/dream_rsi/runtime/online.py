@@ -92,11 +92,13 @@ class CallBudget:
 
     __slots__ = ("_limit", "_lock", "_refusals", "_spent")
 
-    def __init__(self, limit: int | None) -> None:
+    def __init__(self, limit: int | None, initial_spent: int = 0) -> None:
         if limit is not None and limit < 0:
             raise ValueError("call budget must be >= 0")
         self._limit = limit
-        self._spent = 0
+        # A resumed run has already made calls; the ceiling is for the run, not
+        # for the process that happens to be continuing it.
+        self._spent = max(0, int(initial_spent))
         self._refusals = 0
         self._lock = Lock()
 

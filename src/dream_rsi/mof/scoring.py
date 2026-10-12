@@ -239,9 +239,11 @@ class MofScreeningEvaluator:
         timeout_s: float = 120.0,
         python_executable: str | None = None,
         memory_limit_mb: int | None = 2048,
+        pool_digest: str | None = None,
     ) -> None:
         self.pool = pool
         self.labels: dict[str, float] = dict(labels)
+        self._pool_digest = pool_digest
         self.runner_script = Path(runner_script).resolve()
         self.workdir_root = Path(workdir_root).resolve()
         self.k = int(k)
@@ -251,16 +253,25 @@ class MofScreeningEvaluator:
         if not self.runner_script.is_file():
             raise FileNotFoundError(f"candidate runner not found: {self.runner_script}")
 
-        missing = [
+        # The private targets are deliberately absent while the search phase is
+        # running: the vault has taken them off disk and the caller is holding
+        # the labels in memory. Their *digest* is pinned before sealing instead,
+        # so a grader built mid-search still names the data it is grading
+        # against rather than whichever files happen to be present.
+        required = [
             name for name, path in (
                 ("train_features", pool.train_features),
                 ("train_targets", pool.train_targets),
                 ("pool_features", pool.pool_features),
-                ("private_targets", pool.private_targets),
             ) if not path.is_file()
         ]
-        if missing:
-            raise FileNotFoundError(f"pool {pool.label} is missing {', '.join(missing)}")
+        if required:
+            raise FileNotFoundError(f"pool {pool.label} is missing {', '.join(required)}")
+        if not pool.private_targets.is_file() and pool_digest is None:
+            raise FileNotFoundError(
+                f"pool {pool.label}: private targets are not on disk and no digest was "
+                "pinned before they were sealed"
+            )
         self._pool_ids = self._read_pool_ids()
         uncovered = [material for material in self._pool_ids if material not in self.labels]
         if uncovered:
@@ -282,7 +293,7 @@ class MofScreeningEvaluator:
             "kind": "mof_screening_fixed",
             "grader_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "runner_sha256": hashlib.sha256(self.runner_script.read_bytes()).hexdigest(),
-            "pool_data_digest": self.pool.data_digest(),
+            "pool_data_digest": self._pool_digest or self.pool.data_digest(),
             "k": self.k,
             "timeout_s": self.timeout_s,
             "forbidden_imports": sorted(FORBIDDEN_IMPORTS),

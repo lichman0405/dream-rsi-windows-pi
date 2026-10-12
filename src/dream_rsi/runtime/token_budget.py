@@ -96,6 +96,10 @@ class TokenBudget:
     #: development after a long search. Discovery stops at ``limit - reserve``;
     #: policy development may spend the whole limit.
     development_reserve: int = 0
+    #: Spend carried over from an earlier attempt at the same run. A resumed run
+    #: must charge against the ceiling it already used, or the "hard limit"
+    #: would reset every time the process restarted.
+    prior_spent: int = 0
 
     def __post_init__(self) -> None:
         if self.limit <= 0:
@@ -108,7 +112,7 @@ class TokenBudget:
         self.ledger_path = Path(self.ledger_path) if self.ledger_path else None
         self._lock = threading.Lock()
         self._reserved: dict[str, int] = {}
-        self._spent = 0
+        self._spent = max(0, int(self.prior_spent))
         self._refusals = 0
         self._calls = 0
 
@@ -259,7 +263,24 @@ def _cost_record(provider_cost: dict[str, Any] | None) -> dict[str, Any]:
     return {"known": True, "currency": str(currency), "amount": float(amount)}
 
 
+def spend_from_ledger(path: Path) -> int:
+    """Tokens already charged in an existing ledger, for a resumed run."""
+    total = 0
+    if not Path(path).is_file():
+        return 0
+    with Path(path).open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("event") == "request":
+                total += int(row.get("charged") or 0)
+    return total
+
+
 __all__ = [
     "BYTES_PER_TOKEN_FLOOR", "Grant", "PROTOCOL_ALLOWANCE", "ROLE_DISCOVERY",
     "ROLE_POLICY_DEVELOPMENT", "Settlement", "TokenBudget", "estimate_tokens",
+    "spend_from_ledger",
 ]

@@ -270,11 +270,15 @@ def test_block_pipeline_records_ledger_findings_and_freezing(tmp_path: Path) -> 
     runner = MofExperimentRunner(
         project_root=Path.cwd(), protocol=protocol, task_dir=Path("tasks/mof_screening"),
         runner_script=RUNNER, out_root=tmp_path, backend_factory=factory,
+        # The live pilot uses `mof-pilot-s101-r1-A`; a rehearsal must not, and it
+        # must not write into the project's registry either.
+        run_namespace="acceptance-", runtime_root=tmp_path / "runtime",
     )
     plan = block_plans("pilot")[0]
     plan = replace(plan, phase="pilot")
     record = runner.run_block(plan, labels=MofPool.development(PREPARED, 101).load_labels())
 
+    assert record.run_id.startswith("acceptance-")
     assert record.status in ("COMMITTED", "FAILED"), record.error
     assert record.baseline_S is not None and 0.0 < record.baseline_S < 1.0
     assert record.ledger["requests"] > 0, "the ledger must have rows for real calls"

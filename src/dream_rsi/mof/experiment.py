@@ -40,7 +40,7 @@ from ..runtime.controller import Controller, ControllerDeps
 from ..runtime.llm_policy_developer import LlmPolicyDeveloper
 from ..runtime.online import CallBudget
 from ..policy.runner import SubprocessPolicyRunner
-from ..runtime.token_budget import TokenBudget
+from ..runtime.token_budget import TokenBudget, spend_from_ledger
 from ..storage.cas import ContentAddressedStore
 from ..storage.sqlite_registry import Registry
 from .vault import FileVault
@@ -202,6 +202,8 @@ class MofExperimentRunner:
         dry_run: bool = False,
         backend_factory: Any | None = None,
         budget_scale: float = 1.0,
+        run_namespace: str = "",
+        runtime_root: Path | None = None,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.protocol = protocol
@@ -216,10 +218,24 @@ class MofExperimentRunner:
         #: Test seam: shrinks the per-arm ceiling so a smoke block finishes. The
         #: applied ceiling is written into the block record either way.
         self.budget_scale = float(budget_scale)
+        #: Prefix for every run id this runner creates. A live phase leaves it
+        #: empty, so ids stay the ones the protocol names. The acceptance suite
+        #: sets it, because a test that writes into the same registry under the
+        #: same ids is not a rehearsal -- it is a second arm that has already
+        #: spent the live run's budget line before the live run starts.
+        self.run_namespace = run_namespace
+        #: Where this runner's runs live. A live phase uses the project's own
+        #: ``.runtime``; the acceptance suite points it at a temporary directory
+        #: so a rehearsal writes no registry row, no CAS blob and no ledger that
+        #: a real run could later be confused with.
+        self.runtime_root = Path(runtime_root).resolve() if runtime_root else None
         self.out_root.mkdir(parents=True, exist_ok=True)
         self.prepared_root = Path(protocol.prepared_root)
 
     # ------------------------------------------------------------------ config
+
+    def _run_id(self, plan: BlockPlan) -> str:
+        return f"{self.run_namespace}{plan.run_id}"
 
     def _config_for(self, plan: BlockPlan) -> Config:
         spec = self.protocol.spec
@@ -231,7 +247,7 @@ class MofExperimentRunner:
             provider=MODEL["provider"],
             model=MODEL["model"],
             task="mof_screening",
-            run_id=plan.run_id,
+            run_id=self._run_id(plan),
             pi_no_tools=True,
             pi_response_only=True,
         )
@@ -246,35 +262,72 @@ class MofExperimentRunner:
             agent_memory_mb=AGENT_MEMORY_MB, evaluator_memory_mb=EVALUATOR_MEMORY_MB,
             policy_memory_mb=POLICY_MEMORY_MB,
         )
-        return replace(
-            base, loop=loop, timeouts=timeouts,
-            incumbent_policy_path=(self.project_root / method.incumbent_policy).resolve(),
-        )
+        replacements: dict[str, Any] = {
+            "loop": loop,
+            "timeouts": timeouts,
+            "incumbent_policy_path": (self.project_root / method.incumbent_policy).resolve(),
+        }
+        if self.runtime_root is not None:
+            replacements["project_root"] = self.runtime_root
+            replacements["task_dir"] = self.task_dir
+        return replace(base, **replacements)
 
     def _pool(self, split_seed: int) -> MofPool:
         return MofPool.development(self.prepared_root, split_seed)
+
+    def _pool_digest(self, split_seed: int) -> str:
+        """Fingerprint a pool's four files while they are still readable.
+
+        Called before the vault closes. Afterwards the private file is gone by
+        design, and a digest computed then would either fail or describe a
+        different world than the one the labels came from.
+        """
+        return self._pool(split_seed).data_digest()
 
     # ------------------------------------------------------------------ one block
 
     def run_block(
         self, plan: BlockPlan, labels: Mapping[str, float] | None = None,
+        pool_digest: str | None = None,
     ) -> BlockRecord:
         config = self._config_for(plan)
         spec = self.protocol.spec
         method = spec.methods[plan.method]
+        run_id = self._run_id(plan)
+        plan_record = {**plan.to_dict(), "run_id": run_id}
         record = BlockRecord(
-            plan=plan.to_dict(), run_id=plan.run_id, status="RUNNING",
+            plan=plan_record, run_id=run_id, status="RUNNING",
             protocol_digest=self.protocol.digest,
         )
-        run_root = config.run_root(plan.run_id)
+        run_root = config.run_root(run_id)
         run_root.mkdir(parents=True, exist_ok=True)
+
+        # A block interrupted before it sealed is resumed, not restarted with a
+        # fresh id: the design allows an in-place resume only while the model,
+        # the protocol and the billing are unchanged, and the controller answers
+        # the "was anything already paid for" question by reusing sealed worlds.
+        # The ceiling is the run's, so it is seeded with what the run already
+        # spent -- otherwise every restart would hand the arm a new budget.
+        ledger_path = run_root / "cost-ledger.jsonl"
+        probe = Registry(config.db_path)
+        try:
+            existing = probe.get_run(run_id)
+        finally:
+            probe.close()
+        prior_spent = spend_from_ledger(ledger_path)
+        if existing is not None:
+            config = replace(config, resume=True)
+            record.notes.append(
+                f"resumed an existing run; {prior_spent} tokens were already charged to it"
+            )
 
         budget = TokenBudget(
             limit=max(1, int(spec.token_budget * self.budget_scale)),
-            ledger_path=run_root / "cost-ledger.jsonl",
-            context={"run_id": plan.run_id, "phase": plan.phase, "method": plan.method,
+            ledger_path=ledger_path,
+            context={"run_id": run_id, "phase": plan.phase, "method": plan.method,
                      "split_seed": plan.split_seed, "repeat": plan.repeat},
             development_reserve=development_reserve(spec) if method.uses_developer else 0,
+            prior_spent=prior_spent,
         )
 
         pool = self._pool(plan.split_seed)
@@ -283,6 +336,8 @@ class MofExperimentRunner:
             pool=pool, labels=pool_labels, runner_script=self.runner_script,
             workdir_root=run_root / "eval", k=K, timeout_s=EVALUATOR_TIMEOUT_S,
             memory_limit_mb=EVALUATOR_MEMORY_MB,
+            pool_digest=pool_digest if pool_digest is not None else self._pool_digest(
+                plan.split_seed),
         )
         record.evaluator_digest = evaluator.spec_digest
         record.config_digest = config.cfg_digest
@@ -290,7 +345,7 @@ class MofExperimentRunner:
         # The starting program is a candidate in its own right: every arm is
         # free to end where it began, and a report that hid that would make a
         # flat arm look like a missing measurement.
-        baseline = evaluator.evaluate(config.seed_workspace, invocation_id=f"{plan.run_id}-baseline")
+        baseline = evaluator.evaluate(config.seed_workspace, invocation_id=f"{run_id}-baseline")
         record.baseline_S = baseline.score
 
         if self.dry_run:
@@ -328,10 +383,11 @@ class MofExperimentRunner:
             workdir_root=run_root / "policy_sessions",
             timeout_s=POLICY_SELECT_TIMEOUT_S, memory_limit_mb=POLICY_MEMORY_MB,
         )
+        prior_sessions = _sessions_already_made(registry, config.run_id or "")
         deps = ControllerDeps(
             backend=backend, evaluator=evaluator, registry=registry, store=store,
             policy_runner=policy_runner, task=_task_spec(config), developer=developer,
-            budget=CallBudget(spec.session_cap),
+            budget=CallBudget(spec.session_cap, initial_spent=prior_sessions),
         )
         try:
             outcome = Controller(config, deps).run()
@@ -351,7 +407,7 @@ class MofExperimentRunner:
 
         findings = self._collect_findings(config, charge_by_seq)
         record.findings = [finding.to_dict() for finding in findings]
-        frozen = self._freeze(plan, config, baseline.score, findings)
+        frozen = self._freeze(plan, config, baseline.score, findings, run_id)
         record.frozen = [candidate.to_dict() for candidate in frozen]
         if frozen:
             record.final_candidate = frozen[-1].to_dict()
@@ -419,7 +475,8 @@ class MofExperimentRunner:
     # ------------------------------------------------------------------ freezing
 
     def _freeze(
-        self, plan: BlockPlan, config: Config, baseline_S: float, findings: Sequence[Finding],
+        self, plan: BlockPlan, config: Config, baseline_S: float,
+        findings: Sequence[Finding], run_id: str,
     ) -> list[FrozenCandidate]:
         """Best completed candidate at every checkpoint, then the block's final pick.
 
@@ -436,16 +493,16 @@ class MofExperimentRunner:
             eligible = [f for f in findings if f.cumulative <= checkpoint]
             best = _best(findings=eligible, baseline_S=baseline_S)
             frozen.append(self._materialize(
-                plan, config, checkpoint, best, baseline_S, baseline_sha, baseline_source,
+                config, run_id, checkpoint, best, baseline_S, baseline_sha, baseline_source,
             ))
         return frozen
 
     def _materialize(
-        self, plan: BlockPlan, config: Config, checkpoint: int, best: Finding | None,
+        self, config: Config, run_id: str, checkpoint: int, best: Finding | None,
         baseline_S: float, baseline_sha: str, baseline_source: str,
     ) -> FrozenCandidate:
         """Copy the chosen candidate's source into the block's freeze area."""
-        target_dir = config.run_root(plan.run_id) / "frozen" / f"budget-{checkpoint}"
+        target_dir = config.run_root(run_id) / "frozen" / f"budget-{checkpoint}"
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / "candidate.py"
         if best is None or not best.candidate_sha256:
@@ -489,8 +546,10 @@ class MofExperimentRunner:
         so an exception or a Ctrl-C still puts the data back.
         """
         labels_by_split: dict[int, dict[str, float]] = {}
+        digest_by_split: dict[int, str] = {}
         for plan in plans:
             if plan.split_seed not in labels_by_split:
+                digest_by_split[plan.split_seed] = self._pool_digest(plan.split_seed)
                 labels_by_split[plan.split_seed] = self._pool(plan.split_seed).load_labels()
 
         vault = FileVault(manifest_path=self.out_root / "vault-manifest.jsonl")
@@ -513,7 +572,10 @@ class MofExperimentRunner:
         index_path = self.out_root / f"{self.protocol.phase}-blocks.jsonl"
         try:
             for plan in plans:
-                record = self.run_block(plan, labels=labels_by_split[plan.split_seed])
+                record = self.run_block(
+                    plan, labels=labels_by_split[plan.split_seed],
+                    pool_digest=digest_by_split[plan.split_seed],
+                )
                 records.append(record.to_dict())
                 with index_path.open("a", encoding="utf-8", newline="\n") as handle:
                     handle.write(json.dumps(record.to_dict(), sort_keys=True, default=str) + "\n")
@@ -530,6 +592,22 @@ class MofExperimentRunner:
         }
         _write_json(self.out_root / f"{self.protocol.phase}-phase.json", summary)
         return summary
+
+
+def _sessions_already_made(registry: Registry, run_id: str) -> int:
+    """Discovery and developer sessions an existing run has already spent.
+
+    Counted from persisted records rather than from memory, because the whole
+    point is to survive a restart: one node is one discovery call, and one
+    recorded revision is one developer proposal.
+    """
+    if not run_id:
+        return 0
+    sessions = 0
+    for world in registry.list_worlds(run_id):
+        sessions += max(0, len(registry.list_nodes(world.world_id)) - 1)
+    sessions += len(registry.list_revisions(run_id))
+    return sessions
 
 
 def _best(*, findings: Sequence[Finding], baseline_S: float) -> Finding | None:
