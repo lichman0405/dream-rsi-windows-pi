@@ -206,6 +206,16 @@ def run_request(
     cwd = Path(str(request["cwd"]))
     cwd.mkdir(parents=True, exist_ok=True)
     args = [exe, "--mode", "rpc", "--no-session"]
+    if request.get("no_tools"):
+        # Experiments that return a bounded text artifact must not give the
+        # model filesystem, shell, MCP, skill, or project-instruction access.
+        # This keeps the worker's authority at the prompt boundary.
+        args += [
+            "--no-tools", "--no-mcp", "--no-extensions", "--no-skills",
+            "--no-context-files", "--offline",
+        ]
+        if request.get("system_prompt"):
+            args += ["--system-prompt", str(request["system_prompt"])]
     if request.get("provider"):
         args += ["--provider", str(request["provider"])]
     if request.get("model"):
@@ -217,7 +227,8 @@ def run_request(
     )
     events: queue.Queue[dict[str, Any]] = queue.Queue()
     seen: list[str] = []
-    state = {"agent_error": False, "settled_aborted": False, "bad_json": 0}
+    state = {"agent_error": False, "settled_aborted": False, "bad_json": 0,
+             "output_limit": False, "output_bytes": 0}
     texts: list[str] = []
 
     def read_stdout() -> None:
@@ -247,6 +258,15 @@ def run_request(
         if history is not None:
             history.write(record)
         kind = str(record.get("type", ""))
+        inner = record.get("assistantMessageEvent")
+        if kind == "message_update" and isinstance(inner, dict):
+            delta = inner.get("delta")
+            if isinstance(delta, str):
+                state["output_bytes"] += len(delta.encode("utf-8"))
+                cap = int(request.get("max_output_bytes") or 0)
+                if cap and state["output_bytes"] > cap and not state["output_limit"]:
+                    state["output_limit"] = True
+                    send({"id": "abort-output-limit", "type": "abort"})
         seen.append(kind)
         if kind in ("agent_error", "extension_error", "error"):
             state["agent_error"] = True
@@ -312,6 +332,10 @@ def run_request(
             lambda m: m.get("type") == "agent_settled",
             float(request.get("settle_s") or SETTLE_DEFAULT_S),
         )
+        if state["output_limit"]:
+            return {"ok": False, "error_type": "PI_OUTPUT_LIMIT",
+                    "error": f"assistant output exceeded {request.get('max_output_bytes')} bytes",
+                    "event_types": seen[:80], "output_bytes": state["output_bytes"]}
         if state["bad_json"] or state["agent_error"] or state["settled_aborted"]:
             return {"ok": False, "error_type": "PI_AGENT_ERROR",
                     "error": "Pi reported an agent/provider error during the run"}

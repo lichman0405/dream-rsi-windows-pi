@@ -27,7 +27,13 @@ from pathlib import Path
 from typing import Any
 
 from .adapters.base import DiscoveryBackend, TaskSpec
-from .config import BACKEND_IDENTITY_ENV, KNOWN_TASKS, Config, load_config
+from .config import (
+    BACKEND_IDENTITY_ENV,
+    KNOWN_TASKS,
+    Config,
+    load_config,
+    standard_library_only_for,
+)
 from .domain.errors import BlockedModelConfiguration, DreamRsiError
 from .domain.models import new_id
 from .evaluator.command import FixedCommandEvaluator
@@ -126,6 +132,9 @@ def _pi_backend(config: Config, run_id: str) -> DiscoveryBackend:
         model=model,
         timeout_s=config.timeouts.agent_s,
         memory_limit_mb=config.timeouts.agent_memory_mb,
+        no_tools=config.pi_no_tools,
+        response_only=config.pi_response_only,
+        standard_library_only=standard_library_only_for(config.task_dir.name),
     )
 
 
@@ -419,6 +428,8 @@ def _run(args: argparse.Namespace, *, live_required: bool) -> int:
         developer=getattr(args, "developer", "scripted"),
         task=args.task,
         agent_timeout_s=getattr(args, "agent_timeout_s", None),
+        pi_no_tools=getattr(args, "pi_no_tools", False),
+        pi_response_only=getattr(args, "pi_response_only", False),
     )
     # The run id must exist before any path is derived from it: the controller,
     # the evaluator workdir and the policy workdirs all hang off it, and they
@@ -599,6 +610,14 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--versions", type=int, default=None)
         p.add_argument("--run-id", default=None)
         p.add_argument("--resume", action="store_true")
+        p.add_argument(
+            "--pi-no-tools", action="store_true",
+            help="disable Pi tools, extensions, MCP, skills, and project context",
+        )
+        p.add_argument(
+            "--pi-response-only", action="store_true",
+            help="require Pi to return the complete candidate between explicit markers",
+        )
         p.add_argument("--task", default=None, choices=KNOWN_TASKS,
                        help="which task under tasks/ to run (default: the bundled knapsack task)")
         p.add_argument(

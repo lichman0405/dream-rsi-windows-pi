@@ -171,6 +171,9 @@ def test_the_parent_waits_longer_than_the_ceiling_it_hands_the_child(
             event_types: tuple[str, ...] = ()
             stderr_tail = ""
             error = ""
+            token_usage: dict[str, int] = {}
+            token_charged: int | None = None
+            token_seq: int | None = None
 
         return _Result()
 
@@ -233,6 +236,9 @@ def test_the_prompt_announces_the_ceiling_that_will_actually_stop_the_call(
             event_types: tuple[str, ...] = ()
             stderr_tail = ""
             error = ""
+            token_usage: dict[str, int] = {}
+            token_charged: int | None = None
+            token_seq: int | None = None
 
         return _Result()
 

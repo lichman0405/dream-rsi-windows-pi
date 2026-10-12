@@ -18,6 +18,7 @@ await right, and an await bug is exactly the one that fabricates successes.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 import time
@@ -25,6 +26,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ..domain.errors import BlockedModelConfiguration
+from ..runtime.token_budget import TokenBudget
 from ._pi_session import run_pi_prompt
 from .base import (
     ContinuationContext,
@@ -67,6 +69,11 @@ class PiDiscoveryBackend:
         timeout_s: float = 900.0,
         python_executable: str | None = None,
         memory_limit_mb: int | None = 4096,
+        no_tools: bool = False,
+        response_only: bool = False,
+        standard_library_only: bool = True,
+        token_budget: TokenBudget | None = None,
+        max_output_bytes: int = 32768,
     ) -> None:
         self.workdir_root = Path(workdir_root)
         self.provider = provider
@@ -74,6 +81,11 @@ class PiDiscoveryBackend:
         self.timeout_s = float(timeout_s)
         self.python_executable = python_executable or sys.executable
         self.memory_limit_mb = memory_limit_mb
+        self.no_tools = no_tools
+        self.response_only = response_only
+        self.standard_library_only = standard_library_only
+        self.token_budget = token_budget
+        self.max_output_bytes = int(max_output_bytes)
 
     def preflight(self) -> None:
         if not shutil.which("pi"):
@@ -101,13 +113,19 @@ class PiDiscoveryBackend:
 
         entry_file = output_workspace / task.entry_filename
         before = digest_file(entry_file)
+        parent_source = entry_file.read_text(encoding="utf-8") if entry_file.is_file() else ""
 
         run_dir = (self.workdir_root / invocation_id).resolve()
         result = run_pi_prompt(
             request={
                 # The worker is told the ceiling it is actually under, taken
                 # from the same attribute that stops the call.
-                "prompt": build_prompt(task, history, time_limit_s=self.timeout_s, context=context),
+                "prompt": build_prompt(
+                    task, history, time_limit_s=self.timeout_s, context=context,
+                    response_only=self.response_only,
+                    parent_source=parent_source if self.response_only else None,
+                    standard_library_only=self.standard_library_only,
+                ),
                 "cwd": str(output_workspace),
                 "provider": self.provider,
                 "model": self.model,
@@ -118,6 +136,7 @@ class PiDiscoveryBackend:
                 # only showed up as calls producing no candidate. Passing the
                 # ceiling through makes the two the same number.
                 "settle_s": self.timeout_s,
+                "no_tools": self.no_tools,
             },
             run_dir=run_dir,
             # Longer than `settle_s` by a margin, so the child outlives its own
@@ -126,10 +145,18 @@ class PiDiscoveryBackend:
             timeout_s=self.timeout_s + SETTLE_REPORT_MARGIN_S,
             python_executable=self.python_executable,
             memory_limit_mb=self.memory_limit_mb,
+            token_budget=self.token_budget,
+            max_output_bytes=self.max_output_bytes,
         )
 
         duration = time.monotonic() - started
         error_type = result.error_type
+        if error_type is None and self.response_only:
+            source = _extract_candidate(result.final_text)
+            if source is None:
+                error_type = "MISSING_CANDIDATE_ARTIFACT"
+            else:
+                entry_file.write_text(source, encoding="utf-8", newline="\n")
         after = digest_file(entry_file)
         # A settled agent that touched nothing has not done the job. Without
         # this the attempt would be recorded as a success with an unchanged
@@ -149,9 +176,12 @@ class PiDiscoveryBackend:
             summary=result.final_text.strip()[:500],
             session_id=result.session_id,
             raw_response_digest=digest_text(result.final_text) or None,
-            generation_record={"request": json.loads((run_dir / "pi_request.json").read_text(encoding="utf-8"))
+            generation_record={"ledger_seq": result.token_seq,
+                               "token_charged": result.token_charged,
+                               "request": json.loads((run_dir / "pi_request.json").read_text(encoding="utf-8"))
                                if (run_dir / "pi_request.json").exists() else {},
                                "final_response": result.final_text,
+                               "token_usage": result.token_usage,
                                "events": [json.loads(line) for line in
                                           (run_dir / "pi_request.json.history.jsonl").read_text(encoding="utf-8").splitlines()]
                                if (run_dir / "pi_request.json.history.jsonl").exists() else [],
@@ -162,8 +192,26 @@ class PiDiscoveryBackend:
                 "entry_changed": before != after,
                 "stderr_tail": result.stderr_tail,
                 "worker_error": result.error,
+                "token_usage": result.token_usage,
+                "token_charged": result.token_charged,
+                "token_seq": result.token_seq,
             },
         )
 
 
-__all__ = ["PiDiscoveryBackend"]
+_CANDIDATE_BLOCK = re.compile(
+    r"=== CANDIDATE BEGIN ===\s*\r?\n(.*?)\r?\n=== CANDIDATE END ===",
+    flags=re.DOTALL,
+)
+
+
+def _extract_candidate(response: str) -> str | None:
+    """Accept exactly one explicit, bounded candidate artifact from text mode."""
+    matches = list(_CANDIDATE_BLOCK.finditer(response))
+    if len(matches) != 1:
+        return None
+    source = matches[0].group(1)
+    return source if source.strip() else None
+
+
+__all__ = ["PiDiscoveryBackend", "_extract_candidate"]
