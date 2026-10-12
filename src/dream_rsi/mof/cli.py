@@ -271,11 +271,30 @@ def _unseal_dir(project_root: Path, phase: str) -> Path:
 
 
 def cmd_mof_unseal(args: Any) -> int:
-    """Open the sealed pool once, for candidates that were frozen in advance."""
+    """Open the sealed pool once, for candidates that were frozen in advance.
+
+    ``--references-only`` recomputes the fixed screening references on the same
+    sealed pool without re-grading any candidate. It exists because the
+    references are a pure function of the pool and the training set, so a later
+    fix to how they are computed does not invalidate the frozen candidates and
+    must not force a second pass over them.
+    """
     project_root = Path(args.project_root).resolve()
     prepared = _prepared(project_root)
     runner_script = project_root / "tasks" / "mof_screening" / "candidate_runner.py"
     records = _latest_blocks(project_root / OUT_DIR / args.phase / f"{args.phase}-blocks.jsonl")
+    if getattr(args, "references_only", False):
+        target = _unseal_dir(project_root, args.phase)
+        references: dict[str, Any] = {}
+        for split_seed in sorted({int(r["plan"]["split_seed"]) for r in records}):
+            pool = MofPool.final_test(prepared, split_seed=split_seed)
+            references[str(split_seed)] = material_references(
+                pool_features=pool.pool_features, labels=pool.load_labels(),
+                train_features=pool.train_features, train_targets=pool.train_targets, k=K,
+            )
+        write_json(target / "references.json", references)
+        _status("COMPLETED", phase=args.phase, references=len(references), out=str(target))
+        return 0
     if not records:
         _status("FAILED", reason=f"no block records under {OUT_DIR / args.phase}")
         return 1

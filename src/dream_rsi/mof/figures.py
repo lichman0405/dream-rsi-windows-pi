@@ -258,8 +258,6 @@ def recommendation_explanation(
                   if item["method"] == method and item["recommended_uptakes"]]
         if series:
             groups.append((f"{method}", series, ARM_STYLE[method]["color"]))
-    if references.get("random_forest", {}).get("Q"):
-        pass
     for start, (name, series, color) in enumerate(groups):
         flat = [value for run in series for value in run]
         jitter = [start + ((index % 10) - 4.5) * 0.018 for index in range(len(flat))]
@@ -269,22 +267,19 @@ def recommendation_explanation(
                          "mean_uptake": sum(run) / len(run), "n": len(run)})
     offset = len(groups)
     reference_rows: list[tuple[str, float]] = []
-    for key, label in (("random", "random order"), ("ridge", "fixed ridge"),
-                       ("random_forest", "fixed random forest")):
+    for key, label in (("random", "random\norder"), ("ridge", "fixed\nridge"),
+                       ("random_forest", "fixed random\nforest")):
         block = references.get(key) or {}
         if "Q" in block:
             reference_rows.append((label, float(block["Q"])))
-        elif "mean_S" in block:
-            reference_rows.append((label, float("nan")))
     for index, (label, value) in enumerate(reference_rows):
-        ax.scatter([offset + index], [value], marker="_", s=420,
-                   color=REFERENCE_STYLE["color"], linewidths=2.0)
-        ax.text(offset + index, value, f"  {label}", fontsize=7.5, va="center",
-                color=REFERENCE_STYLE["color"])
-        rows.append({"group": label, "kind": "reference", "mean_uptake": value, "n": 10})
+        ax.scatter([offset + index], [value], marker="_", s=520,
+                   color=REFERENCE_STYLE["color"], linewidths=2.4, zorder=3)
+        rows.append({"group": " ".join(label.split()), "kind": "reference",
+                     "mean_uptake": value, "n": 10})
     ax.set_xticks(list(range(len(groups))) + [offset + i for i in range(len(reference_rows))])
-    ax.set_xticklabels([name for name, _s, _c in groups] + ["" for _ in reference_rows],
-                       fontsize=8)
+    ax.set_xticklabels([name for name, _s, _c in groups]
+                       + [name for name, _v in reference_rows], fontsize=8)
     ax.set_ylabel("CO$_2$ uptake of the recommended materials (mol/kg)")
     ax.grid(alpha=0.25, linewidth=0.6, axis="y")
     ax.set_title("What each arm actually recommended, against the references", fontsize=10)

@@ -235,6 +235,8 @@
         "reason": "the pinned CRAFTED 2.0.1 descriptor frame carries the RAC families only; no accessible-pore-volume column exists in the frozen inputs"
       },
       "random": {
+        "Q": 3.6295993657000003,
+        "Q_sd": 0.7490774334062854,
         "draws": 100,
         "max_S": 0.6044623322790832,
         "mean_S": 0.40088211284729175,
@@ -262,6 +264,8 @@
         "reason": "the pinned CRAFTED 2.0.1 descriptor frame carries the RAC families only; no accessible-pore-volume column exists in the frozen inputs"
       },
       "random": {
+        "Q": 3.6295993657000003,
+        "Q_sd": 0.7490774334062854,
         "draws": 100,
         "max_S": 0.6044623322790832,
         "mean_S": 0.40088211284729175,

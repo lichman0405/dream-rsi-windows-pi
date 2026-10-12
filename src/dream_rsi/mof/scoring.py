@@ -547,17 +547,25 @@ def material_references(
     out: dict[str, Any] = {"pool_materials": len(pool_ids), "k": k}
 
     random_scores: list[float] = []
+    random_uptakes: list[float] = []
     rng = np.random.default_rng(20261012)
     for _seed in seeds:
         order = rng.permutation(len(pool_ids))[:k]
         ranking = [pool_ids[index] for index in order]
-        random_scores.append(score_ranking(ranking, labels, k=k)[2])
+        q, _q_star, s_random, recommended, _top = score_ranking(ranking, labels, k=k)
+        random_scores.append(s_random)
+        random_uptakes.append(q)
     out["random"] = {
         "draws": len(random_scores),
         "mean_S": float(np.mean(random_scores)),
         "sd_S": float(np.std(random_scores, ddof=1)),
         "min_S": float(np.min(random_scores)),
         "max_S": float(np.max(random_scores)),
+        # The raw-uptake figure plots Q, so the random baseline needs one too:
+        # without it the figure would show two references where the design asks
+        # for three, and the missing one is the floor.
+        "Q": float(np.mean(random_uptakes)),
+        "Q_sd": float(np.std(random_uptakes, ddof=1)),
     }
 
     ridge = Ridge(alpha=1.0, random_state=20261012).fit(train_scaled, y)

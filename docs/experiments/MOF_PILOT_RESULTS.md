@@ -58,11 +58,15 @@ what revealed it.
 
 ## Screening references on the same sealed pool
 
-| reference | `S`, split 101 | `S`, split 211 |
-| --- | --- | --- |
-| random ordering (100 draws) | 0.4009 | 0.4009 |
-| fixed ridge, `alpha=1.0` | 0.7595 | 0.7758 |
-| fixed random forest | 0.9022 | 0.8515 |
+| reference | `S`, split 101 | `S`, split 211 | `Q` (mol/kg), split 101 / 211 |
+| --- | --- | --- | --- |
+| random ordering (100 draws) | 0.4009 | 0.4009 | 3.63 / 3.63 |
+| fixed ridge, `alpha=1.0` | 0.7595 | 0.7758 | 6.88 / 7.02 |
+| fixed random forest | 0.9022 | 0.8515 | 8.17 / 7.71 |
+
+The sealed pool is the same 197 materials for every split, so a reference's `S` moves
+between splits only through its training set; random ordering does not train, so its two
+rows are identical by construction.
 
 A and B land at 0.78–0.86: clearly above the ridge baseline they started from, and around
 the random forest or slightly below it on split 101. These are *material-screening*
