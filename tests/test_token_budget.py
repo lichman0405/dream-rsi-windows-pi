@@ -139,3 +139,41 @@ def test_the_reservation_bound_grows_with_the_request() -> None:
 def test_a_non_positive_ceiling_is_rejected(bad: int) -> None:
     with pytest.raises(ValueError):
         TokenBudget(limit=bad)
+
+
+def test_an_interrupted_call_is_still_charged_on_resume(tmp_path: Path) -> None:
+    """A reservation with no settlement is a call the service may have billed.
+
+    This is the double-spend a resume has to avoid: the process died while the
+    call was in flight, so no `request` row was ever written, and a resume that
+    summed only settled rows would hand the arm back headroom it had already
+    used.
+    """
+    ledger = tmp_path / "cost-ledger.jsonl"
+    first = TokenBudget(limit=1_000_000, ledger_path=ledger)
+    grant = _reserve(first)
+    assert grant is not None
+    first.settle(grant, {"total": 30_000, "reported_messages": 1},
+                 role=ROLE_DISCOVERY, duration_s=1.0, ok=True)
+    orphan = _reserve(first)          # reserved, then the process dies
+    assert orphan is not None
+
+    # 30_000 settled plus the orphan's reservation, not 30_000 alone.
+    assert spend_from_ledger(ledger) == 30_000 + orphan.reservation
+    resumed = TokenBudget(limit=1_000_000, ledger_path=ledger,
+                          prior_spent=spend_from_ledger(ledger))
+    assert resumed.spent == 30_000 + orphan.reservation
+
+
+def test_a_phase_ceiling_is_the_sum_of_the_arm_ceilings() -> None:
+    from dream_rsi.mof.protocol import PHASES
+
+    formal = PHASES["formal"]
+    assert formal.total_token_cap == 3 * 10 * 30_000_000
+    assert PHASES["pilot"].total_token_cap == 3 * 4 * 5_000_000
+    # The two phases must keep the per-arm ceiling the design fixes, because the
+    # pilot's measurements are only a basis for the formal phase if they are
+    # measuring the same arms under the same cap.
+    assert (formal.methods["C"].W, formal.methods["C"].K1) == (1, 96)
+    assert formal.split_seeds == (101, 211, 307, 401, 503)
+    assert formal.repeats == (1, 2)

@@ -114,15 +114,36 @@ class PhaseSpec:
     def blocks(self) -> int:
         return len(self.split_seeds) * len(self.repeats)
 
+    @property
+    def total_token_cap(self) -> int:
+        """The phase ceiling the design states as ``methods x blocks x budget``.
 
-def _methods(*, w: int, k1: int, a_M: int) -> dict[str, MethodSpec]:
+        It is an arithmetic consequence of the per-arm ceilings rather than a
+        separate decision, and it is checked anyway: a block that is resumed
+        repeatedly after repeated interruptions is the one case where "each arm
+        stayed inside its own ceiling" and "the phase stayed inside its total"
+        can stop being the same statement.
+        """
+        return len(self.methods) * self.blocks * self.token_budget
+
+
+def _methods(*, w: int, k1: int, a_M: int, c_k1: int) -> dict[str, MethodSpec]:
+    """The three arms. ``c_k1`` is separate because the design fixes it per phase.
+
+    The design's parameter table gives method C ``K1 = 64`` for the pilot and
+    ``96`` for the formal phase -- C is serial, so its depth *is* its budget in a
+    way A's and B's is not. Hard-coding the pilot's value here would have run the
+    formal phase with the pilot's search depth, which is the kind of silent
+    deviation from the frozen protocol that the whole pre-registration exists to
+    prevent.
+    """
     return {
         "A": MethodSpec(key="A", name="dream_rsi", incumbent_policy="policies/incumbent.py",
                         uses_developer=True, W=w, K1=k1, M=a_M),
         "B": MethodSpec(key="B", name="frozen_initial", incumbent_policy="policies/incumbent.py",
                         uses_developer=False, W=w, K1=k1, M=1),
         "C": MethodSpec(key="C", name="frozen_serial", incumbent_policy="policies/serial.py",
-                        uses_developer=False, W=1, K1=64, M=1),
+                        uses_developer=False, W=1, K1=c_k1, M=1),
     }
 
 
@@ -136,14 +157,14 @@ PHASES: Mapping[str, PhaseSpec] = {
         token_budget=5_000_000, session_cap=128,
         split_seeds=SPLIT_SEEDS[:2], repeats=(1, 2),
         checkpoints=(500_000, 1_000_000, 2_000_000, 5_000_000),
-        methods=_methods(w=8, k1=8, a_M=2),
+        methods=_methods(w=8, k1=8, a_M=2, c_k1=64),
     ),
     "formal": PhaseSpec(
         key="formal", worlds=8,
         token_budget=30_000_000, session_cap=768,
         split_seeds=SPLIT_SEEDS, repeats=(1, 2),
         checkpoints=(1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000, 30_000_000),
-        methods=_methods(w=8, k1=12, a_M=3),
+        methods=_methods(w=8, k1=12, a_M=3, c_k1=96),
     ),
 }
 
@@ -249,6 +270,11 @@ class Protocol:
         return {
             "schema": "dream-rsi-mof-protocol-v1",
             "phase": self.phase,
+            # `total_token_cap` is deliberately absent: it is the product of
+            # values already in here, so it carries no information the digest
+            # does not have, and putting it in would move the digest of a phase
+            # that has already run. A frozen digest that can be changed by
+            # restating a derived number is not frozen.
             "phase_spec": {
                 "worlds": spec.worlds, "token_budget": spec.token_budget,
                 "session_cap": spec.session_cap, "split_seeds": list(spec.split_seeds),

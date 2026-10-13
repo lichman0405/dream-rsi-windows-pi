@@ -264,8 +264,20 @@ def _cost_record(provider_cost: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def spend_from_ledger(path: Path) -> int:
-    """Tokens already charged in an existing ledger, for a resumed run."""
-    total = 0
+    """Tokens a run has already committed, for a resumed run.
+
+    Two kinds of row count. A settled ``request`` costs what it was charged. A
+    ``reserved`` row with no matching request is a call that was *in flight* when
+    the process died: the service may well have served and billed it, and the
+    settlement that would have said so never got written. Charging such a row its
+    reservation is the conservative reading, and it is the one that keeps the
+    ceiling a ceiling -- the alternative hands an interrupted arm back the
+    headroom it had already spent, which is exactly the double-spend a resume is
+    supposed to avoid.
+    """
+    settled: set[str] = set()
+    charged = 0
+    reservations: dict[str, int] = {}
     if not Path(path).is_file():
         return 0
     with Path(path).open(encoding="utf-8") as handle:
@@ -274,9 +286,16 @@ def spend_from_ledger(path: Path) -> int:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if row.get("event") == "request":
-                total += int(row.get("charged") or 0)
-    return total
+            event = row.get("event")
+            if event == "request":
+                settled.add(str(row.get("call_id")))
+                charged += int(row.get("charged") or 0)
+            elif event == "reserved":
+                reservations[str(row.get("call_id"))] = int(
+                    row.get("reservation_upper_bound") or 0
+                )
+    dangling = sum(value for key, value in reservations.items() if key not in settled)
+    return charged + dangling
 
 
 __all__ = [

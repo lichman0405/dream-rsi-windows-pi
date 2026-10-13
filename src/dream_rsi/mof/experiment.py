@@ -570,12 +570,28 @@ class MofExperimentRunner:
 
         records: list[dict[str, Any]] = []
         index_path = self.out_root / f"{self.protocol.phase}-blocks.jsonl"
+        ceiling = self.protocol.spec.total_token_cap
+        committed = 0
+        phase_notes: list[str] = []
         try:
             for plan in plans:
+                # The phase ceiling is exactly the sum of the per-arm ceilings,
+                # and each arm stays inside its own -- so this is the backstop
+                # for the case where those two facts stop adding up, such as
+                # repeated resumes against the same block after interruptions.
+                # Each block's ledger is cumulative for that block alone, so the
+                # running total is a plain sum with no delta arithmetic.
+                if ceiling is not None and committed >= ceiling:
+                    phase_notes.append(
+                        f"phase token ceiling reached: {committed} committed of {ceiling}; "
+                        f"{len(plans) - len(records)} arm-run(s) not started"
+                    )
+                    break
                 record = self.run_block(
                     plan, labels=labels_by_split[plan.split_seed],
                     pool_digest=digest_by_split[plan.split_seed],
                 )
+                committed += int((record.ledger or {}).get("charged_total") or 0)
                 records.append(record.to_dict())
                 with index_path.open("a", encoding="utf-8", newline="\n") as handle:
                     handle.write(json.dumps(record.to_dict(), sort_keys=True, default=str) + "\n")
@@ -588,6 +604,9 @@ class MofExperimentRunner:
             "phase": self.protocol.phase,
             "protocol_digest": self.protocol.digest,
             "isolation": isolation,
+            "phase_token_cap": ceiling,
+            "phase_tokens_committed": committed,
+            "notes": phase_notes,
             "blocks": records,
         }
         _write_json(self.out_root / f"{self.protocol.phase}-phase.json", summary)

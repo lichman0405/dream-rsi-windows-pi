@@ -529,3 +529,65 @@ def test_the_grader_can_run_while_its_labels_are_off_disk(tmp_path: Path) -> Non
     finally:
         vault.release()
     assert vault.verify_restored()["ok"]
+
+
+# ------------------------------------------------------------------- resume
+
+
+def test_a_block_that_was_already_run_resumes_instead_of_respending(
+    tmp_path: Path, split_101: Path,
+) -> None:
+    """A restart must not buy the arm a second budget.
+
+    This is the local check that a phase can be interrupted and continued. The
+    scripted backend replaces the model, so the cost of a resumed block is
+    deterministic and the assertions are about accounting, not about a service.
+    """
+    from dream_rsi.mof.experiment import MofExperimentRunner
+    from dream_rsi.mof.protocol import MethodSpec, PhaseSpec, Protocol, block_plans
+
+    spec = PhaseSpec(
+        key="acceptance", worlds=1, token_budget=200_000, session_cap=32,
+        split_seeds=(101,), repeats=(1,), checkpoints=(1_000, 100_000),
+        methods={
+            method: MethodSpec(key=method, name=method,
+                               incumbent_policy="policies/incumbent.py",
+                               uses_developer=False, W=2, K1=2, M=1)
+            for method in ("A", "B", "C")
+        },
+    )
+    protocol = Protocol(phase="pilot", prepared_root=str(PREPARED), spec_override=spec)
+    runtime = tmp_path / "runtime"
+
+    def factory(config, plan, budget):  # noqa: ANN001 - test seam
+        return _ScriptedMofBackend(budget)
+
+    runner = MofExperimentRunner(
+        project_root=Path.cwd(), protocol=protocol, task_dir=Path("tasks/mof_screening"),
+        runner_script=RUNNER, out_root=tmp_path, backend_factory=factory,
+        run_namespace="resume-", runtime_root=runtime,
+    )
+    plan = block_plans("pilot")[0]
+    pool = _pool_from(split_101, "resume-101")
+
+    first = runner.run_block(plan, labels=pool.load_labels(),
+                             pool_digest=pool.data_digest())
+    spent_first = int(first.ledger["charged_total"])
+    first_nodes = {finding["node_id"] for finding in first.findings}
+    assert spent_first > 0
+
+    second = runner.run_block(plan, labels=pool.load_labels(),
+                              pool_digest=pool.data_digest())
+    spent_second = int(second.ledger["charged_total"])
+
+    assert any("no work repeated" in note for note in second.notes), second.notes
+    assert spent_second == spent_first, (
+        "a resumed block must not spend again: it reuses sealed worlds, and its "
+        "ceiling is seeded from the ledger it already wrote"
+    )
+    assert {finding["node_id"] for finding in second.findings} == first_nodes, (
+        "resuming must not grow a second tree"
+    )
+    assert second.budget["limit"] == first.budget["limit"], (
+        "the ceiling belongs to the run, not to the process continuing it"
+    )
