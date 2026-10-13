@@ -4,8 +4,10 @@
 **Model:** `cc-switch-deep-seek` / `deepseek-v4-pro`, extended reasoning `off` for every call.
 **Ran:** 2026-10-12 18:26 → 2026-10-13 05:42 local. **Blocks:** 4 of 4 complete
 (2 split seeds × 2 repeats). **Arm-runs:** 12 of 12 `COMMITTED`.
-**Held-out data:** sealed for the whole phase — 4,089 files off disk, verified absent,
-restored byte-identical. **Failed service requests:** 0.
+**Held-out data:** sealed for the whole *search* — 4,089 files off disk, verified absent,
+restored byte-identical. **Failed service requests:** 0. The unseal pass that followed ran
+with the labels back on disk, before that path was sealed too; what the audit found is in
+"Isolation at unseal" below.
 
 ## The answer to the question the experiment asks
 
@@ -121,6 +123,52 @@ All five are in `docs/experiments/pilot/` as PNG, SVG and the CSV behind every s
 `fig5` is captioned as an internal policy signal. A rising `V` is not evidence that the
 materials recommended to a user got better, and is not used as one here: A's `V` improved
 over the incumbent in the selection rounds while its sealed-pool score did not.
+
+## Isolation at unseal: audit of the historical run
+
+The unseal pass that produced this document's test numbers ran **before** `mof-unseal` was
+put under the vault, so frozen candidate code executed with the test labels present on
+disk. That is a real gap and it was audited afterwards rather than assumed away.
+
+**What the historical boundary actually was.** Each candidate ran as
+`python -I candidate_runner.py <scratch>` with `cwd` set to a scratch directory holding
+exactly `candidate.py`, the training features and targets, the pool *features* (the sealed
+test features, which it must rank), and `call.json` — no labels file. Its environment was a
+12-variable allowlist; it ran under a job object (2 GB, ≤4 processes) with a 120 s deadline.
+In-process it faced an allowlist import screen (anything outside a pure-computation standard
+library plus numpy/pandas/sklearn is refused, and `open`, `__import__`, `eval`, `exec` and
+`compile` are refused by name) and a runtime guard on network imports. **At the OS level
+there was no confinement at all**: same user, same integrity, so the labels were readable by
+the process. `pandas.read_csv("<path>")` was not blocked — the gap was knowledge of the
+path, not capability.
+
+**What executed.** The record, the frozen files and the bytes that ran agree exactly:
+48 frozen entries across 12 arm-runs, 13 distinct programs (an arm that does not improve
+freezes the same file at every checkpoint), 84 executions — 48 checkpoint runs plus 3
+row-order permutations of each of the 12 final candidates. Every one of the 84 left its
+source copy behind in the scratch directory, every copy's SHA-256 is in the recorded set,
+and no recorded hash is missing from disk.
+
+**What the evidence shows.** None of the 13 programs contains a file-reading call
+(`read_csv`, `read_pickle`, `open`, `numpy.load`/`loadtxt`/`genfromtxt`, `sklearn.datasets`
+loaders), none contains a path-like string literal, and none imports anything outside the
+allowlist; the single `getattr` walks scikit-learn estimator attributes to set a seed. All
+84 executions returned `ok`; no execution wrote to stdout, and the only stderr in the whole
+set is a scikit-learn convergence warning — there is no traceback and no
+`FileNotFoundError`/`PermissionError` anywhere. Behaviourally, the highest sealed-pool `S`
+any frozen candidate reached is **0.8605**, and a program that had read the labels would
+have returned the true top ten and scored about 1.0.
+
+**Conclusion: no evidence that any candidate read the test labels, and the specific
+programs that ran could not have with the code they contained.** The risk was live and
+unrealised, not absent. Two things this does not establish: a static reading cannot exclude
+a construction nobody thought to look for, and the candidates cannot be re-run to prove a
+negative. `mof-unseal` now seals the same protected set, so the gap is closed for future
+runs (`MOF_SCREENING_DESIGN.md` §2.4).
+
+**This is a separate matter from the experimenter having seen the result.** The pool is no
+longer blind to *me* — see the limits below — and no amount of candidate-side isolation
+changes that.
 
 ## What went wrong, and what was fixed
 
