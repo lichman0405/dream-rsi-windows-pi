@@ -1,6 +1,7 @@
 {
   "arm_runs": 12,
-  "blocks": 12,
+  "blocks": 4,
+  "complete_blocks": 4,
   "figures": {
     "internal_mechanism": {
       "csv": "docs/experiments/pilot/fig5_internal_mechanism.csv",

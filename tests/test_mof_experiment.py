@@ -410,3 +410,122 @@ def test_paired_table_uses_one_candidate_per_run(tmp_path: Path) -> None:
     table = paired_table([row(500_000, False, 0.10), row(5_000_000, True, 0.80)])
     assert len(table["rows"]) == 1
     assert table["rows"][0]["A_test_S"] == pytest.approx(0.80)
+
+
+# ------------------------------------------- unfrozen-code isolation at unseal
+
+
+def _synthetic_pool(root: Path, *, label: str = "synthetic") -> MofPool:
+    """A tiny pool with otherwise-real files, for isolation tests only.
+
+    Nothing here is CRAFTED data: the point is to exercise the machinery that
+    keeps held-out labels away from model-written code without reading, sealing
+    or depending on the real held-out files.
+    """
+    agent = root / "agent"
+    private = root / "private"
+    agent.mkdir(parents=True, exist_ok=True)
+    private.mkdir(parents=True, exist_ok=True)
+    ids = [f"mof_synthetic_{index:03d}" for index in range(40)]
+    with (agent / "train_features.csv").open("w", newline="", encoding="utf-8") as handle:
+        handle.write("material_id,f0,f1\n")
+        for index, material in enumerate(ids[:26]):
+            handle.write(f"{material},{index},{index * 2}\n")
+    with (agent / "train_targets.csv").open("w", newline="", encoding="utf-8") as handle:
+        handle.write("material_id,target_mol_kg\n")
+        for index, material in enumerate(ids[:26]):
+            handle.write(f"{material},{1.0 + index * 0.1}\n")
+    with (agent / "dev_features.csv").open("w", newline="", encoding="utf-8") as handle:
+        handle.write("material_id,f0,f1\n")
+        for index, material in enumerate(ids[26:]):
+            handle.write(f"{material},{index},{index * 3}\n")
+    with (private / "dev_targets.private.csv").open("w", newline="", encoding="utf-8") as handle:
+        handle.write("material_id,target_mol_kg,uncertainty_mol_kg\n")
+        for index, material in enumerate(ids[26:]):
+            handle.write(f"{material},{2.0 + index * 0.2},0.1\n")
+    return MofPool(
+        label=label, train_features=agent / "train_features.csv",
+        train_targets=agent / "train_targets.csv",
+        pool_features=agent / "dev_features.csv",
+        private_targets=private / "dev_targets.private.csv",
+    )
+
+
+def test_candidate_cannot_read_the_labels_while_it_is_being_graded(tmp_path: Path) -> None:
+    """The property the whole search-phase arrangement exists for.
+
+    The candidate is given a source that does the one thing a cheating program
+    would do -- read the pool's true labels from a path -- and the assertion is
+    that the path is not there while it runs. The path is guessed rather than
+    discovered, which is the realistic attack: a candidate cannot learn the
+    layout during the search, when the file is absent, and hope to find it later
+    only if it survives both passes.
+    """
+    from dream_rsi.mof.vault import FileVault
+
+    pool = _synthetic_pool(tmp_path / "pool")
+    labels = pool.load_labels()
+    evaluator = MofScreeningEvaluator(
+        pool=pool, labels=labels, runner_script=RUNNER,
+        workdir_root=tmp_path / "eval", k=3,
+    )
+    # Not a real path and never a real label: it only has to be the path the
+    # candidate would try, so that the test shows the file's absence rather
+    # than the candidate's good manners.
+    target = pool.private_targets.resolve()
+    cheater = tmp_path / "cheater"
+    cheater.mkdir()
+    (cheater / "candidate.py").write_text(
+        "import pandas as pd\n"
+        f"TARGET = r'{target}'\n"
+        "def rank(train_X, train_y, pool_X, *, k, seed):\n"
+        "    try:\n"
+        "        truth = pd.read_csv(TARGET)\n"
+        "        order = truth.sort_values('target_mol_kg', ascending=False)\n"
+        "        return order['material_id'].tolist()[:k]\n"
+        "    except Exception as exc:\n"
+        "        raise RuntimeError('labels unreachable: ' + type(exc).__name__) from exc\n",
+        encoding="utf-8",
+    )
+
+    vault = FileVault(manifest_path=tmp_path / "vault.jsonl")
+    vault.seal([pool.private_targets])
+    try:
+        assert vault.verify_absent()["ok"]
+        verdict = evaluator.evaluate(cheater, invocation_id="cheater")
+        assert verdict.score == 0.0, "a candidate that reads the labels must not score"
+        assert verdict.error_type == "CANDIDATE_RAISED"
+        assert "labels unreachable: FileNotFoundError" in str(verdict.detail.get("error", ""))
+    finally:
+        vault.release()
+    assert vault.verify_restored()["ok"]
+
+    # With the vault open the same program succeeds, which is what makes the
+    # assertion above about the seal rather than about the program.
+    open_verdict = evaluator.evaluate(cheater, invocation_id="cheater-open")
+    assert open_verdict.score > 0.9, (
+        "the probe must actually be able to read the file when it is present, "
+        "or the test above proves nothing"
+    )
+
+
+def test_the_grader_can_run_while_its_labels_are_off_disk(tmp_path: Path) -> None:
+    """Preloaded labels let the unseal pass run under the same arrangement."""
+    from dream_rsi.mof.vault import FileVault
+
+    pool = _synthetic_pool(tmp_path / "pool2", label="synthetic-sealed")
+    labels = pool.load_labels()
+    evaluator = MofScreeningEvaluator(
+        pool=pool, labels=labels, runner_script=RUNNER,
+        workdir_root=tmp_path / "eval2", k=3,
+    )
+    vault = FileVault(manifest_path=tmp_path / "vault2.jsonl")
+    vault.seal([pool.private_targets])
+    try:
+        assert vault.verify_absent()["ok"]
+        verdict = evaluator.evaluate(BASELINE, invocation_id="sealed")
+        assert verdict.status.value in ("SUCCESS", "FAILED"), verdict.detail
+        assert float(verdict.detail["Q_star"]) > 0
+    finally:
+        vault.release()
+    assert vault.verify_restored()["ok"]

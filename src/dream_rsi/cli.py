@@ -671,6 +671,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--phase", default="pilot", choices=("pilot", "formal"))
     p.add_argument("--references-only", action="store_true",
                    help="recompute the fixed screening references only; re-grades no candidate")
+    p.add_argument("--no-isolation", action="store_true",
+                   help="do not take the held-out data off disk while frozen candidates run")
     p.set_defaults(func=_mof("cmd_mof_unseal"))
 
     p = sub.add_parser("mof-report", help="figures, tables and summary.md for a phase")

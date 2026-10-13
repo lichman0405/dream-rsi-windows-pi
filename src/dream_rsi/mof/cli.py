@@ -253,6 +253,14 @@ def cmd_mof_run(args: Any) -> int:
 # --------------------------------------------------------------------- unseal
 
 
+def _by_block(records: Sequence[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group arm-run records by the paired block they belong to."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in records:
+        grouped.setdefault(str(row.get("plan", {}).get("block_id", "?")), []).append(row)
+    return grouped
+
+
 def _latest_blocks(path: Path) -> list[dict[str, Any]]:
     """One record per arm-run: the last one written.
 
@@ -299,32 +307,66 @@ def cmd_mof_unseal(args: Any) -> int:
         _status("FAILED", reason=f"no block records under {OUT_DIR / args.phase}")
         return 1
     target = _unseal_dir(project_root, args.phase)
-    results: list[dict[str, Any]] = []
-    for record in records:
-        if record.get("status") != "COMMITTED" and not record.get("final_candidate"):
-            continue
-        try:
-            verdicts = unseal_block(
-                record=record, prepared_root=prepared, runner_script=runner_script,
-                workdir_root=target / "work",
-            )
-        except Exception as exc:  # noqa: BLE001 - a failed unseal is a recorded outcome
-            results.append({"run_id": record["run_id"], "error": f"{type(exc).__name__}: {exc}"})
-            continue
-        results.extend(verdict.to_dict() for verdict in verdicts)
-    write_json(target / "unsealed.json", results)
+    splits = sorted({int(r["plan"]["split_seed"]) for r in records})
 
-    # The references use the same sealed pool, so they are computed here and
-    # nowhere earlier: before unsealing there is no test label in this process.
-    references: dict[str, Any] = {}
-    for split_seed in sorted({int(r["plan"]["split_seed"]) for r in records}):
-        pool = MofPool.final_test(prepared, split_seed=split_seed)
-        references[str(split_seed)] = material_references(
-            pool_features=pool.pool_features, labels=pool.load_labels(),
-            train_features=pool.train_features, train_targets=pool.train_targets, k=K,
-        )
-    write_json(target / "references.json", references)
-    _status("COMPLETED", phase=args.phase, unsealed=len(results), out=str(target))
+    # Every label this command will need, read before anything is sealed. The
+    # unseal runs frozen candidate code, and a frozen candidate is still code
+    # written by a model: leaving the answers on disk while it executes would
+    # make the whole search-phase arrangement cosmetic. A candidate cannot have
+    # Learned the path during the search, when the file did not exist, but it
+    # can contain a guess that fails harmlessly then and succeeds now -- the
+    # only thing that stops that is the file not being there either time.
+    labels_by_split = {seed: MofPool.final_test(prepared, split_seed=seed).load_labels()
+                       for seed in splits}
+    protect = [] if getattr(args, "no_isolation", False) else default_protected_paths(
+        prepared, dataset_root=project_root / DATA_DIR, raw_root=project_root / RAW_DIR)
+    vault = FileVault(manifest_path=target / "vault-manifest.jsonl")
+    isolation: dict[str, Any] = {}
+    if protect:
+        isolation["sealed"] = vault.seal(protect)
+        isolation["verified_absent"] = vault.verify_absent()
+        if not isolation["verified_absent"]["ok"]:
+            vault.release()
+            _status("FAILED", reason="protected paths are still readable; refusing to "
+                                     "run frozen candidates against them")
+            return 1
+
+    results: list[dict[str, Any]] = []
+    try:
+        for record in records:
+            if record.get("status") != "COMMITTED" and not record.get("final_candidate"):
+                continue
+            try:
+                verdicts = unseal_block(
+                    record=record, prepared_root=prepared, runner_script=runner_script,
+                    workdir_root=target / "work",
+                    labels=labels_by_split[int(record["plan"]["split_seed"])],
+                )
+            except Exception as exc:  # noqa: BLE001 - a failed unseal is a recorded outcome
+                results.append({"run_id": record["run_id"],
+                                "error": f"{type(exc).__name__}: {exc}"})
+                continue
+            results.extend(verdict.to_dict() for verdict in verdicts)
+        write_json(target / "unsealed.json", results)
+
+        # The references use the same sealed pool, so they are computed here and
+        # nowhere earlier: before unsealing there is no test label in this process.
+        references: dict[str, Any] = {}
+        for seed in splits:
+            pool = MofPool.final_test(prepared, split_seed=seed)
+            references[str(seed)] = material_references(
+                pool_features=pool.pool_features, labels=labels_by_split[seed],
+                train_features=pool.train_features, train_targets=pool.train_targets, k=K,
+            )
+        write_json(target / "references.json", references)
+    finally:
+        if vault.sealed:
+            isolation["released"] = vault.release()
+            isolation["verified_restored"] = vault.verify_restored()
+    if isolation:
+        write_json(target / "unseal-isolation.json", isolation)
+    _status("COMPLETED", phase=args.phase, unsealed=len(results),
+            isolated=bool(isolation), out=str(target))
     return 0
 
 
@@ -365,7 +407,17 @@ def cmd_mof_report(args: Any) -> int:
     report = {
         "phase": args.phase,
         "protocol_digest": blocks[0]["protocol_digest"] if blocks else None,
-        "blocks": len(blocks),
+        # A block and an arm-run are not the same thing and must not share a
+        # number: one paired block runs all three arms. Reporting twelve
+        # "blocks" for a four-block pilot overstates the design by 3x, and a
+        # reviewer reading the analysis would be comparing against the wrong
+        # denominator.
+        "blocks": len(_by_block(blocks)),
+        "complete_blocks": sum(
+            1 for arms in _by_block(blocks).values()
+            if {"A", "B", "C"} <= {arm["plan"]["method"] for arm in arms}
+            and all(arm.get("status") == "COMMITTED" for arm in arms)
+        ),
         "arm_runs": len(blocks),
         "unsealed": sum(1 for row in unsealed if row.is_final),
         "unsealed_checkpoint_candidates": len(unsealed),
@@ -482,8 +534,11 @@ def _write_summary(
     lines.append(f"# MOF screening experiment — {phase} phase\n")
     lines.append(f"- Protocol digest: `{report['protocol_digest']}`")
     lines.append(f"- Model: `{MODEL['provider']}` / `{MODEL['model']}`, thinking `{THINKING}`")
-    lines.append(f"- Arm-runs recorded: {report['arm_runs']}; unsealed candidates: "
-                 f"{report['unsealed']}")
+    lines.append(f"- Paired blocks: {report['complete_blocks']} complete of "
+                 f"{report['blocks']} ({report['arm_runs']} arm-runs recorded)")
+    lines.append(f"- Unsealed final candidates: {report['unsealed']} "
+                 f"(plus {report.get('unsealed_checkpoint_candidates', 0) - report['unsealed']} "
+                 "checkpoint candidates)")
     lines.append("")
     lines.append("## Cost\n")
     lines.append(f"- Service requests: **{ledger['requests']}** "

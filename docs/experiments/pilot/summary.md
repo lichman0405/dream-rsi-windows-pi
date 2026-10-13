@@ -2,7 +2,8 @@
 
 - Protocol digest: `9f5940ed36ffbedf3b4ce3a6f43a4d65ee07435df1a4727f15e6c9620430b0f8`
 - Model: `cc-switch-deep-seek` / `deepseek-v4-pro`, thinking `off`
-- Arm-runs recorded: 12; unsealed candidates: 12
+- Paired blocks: 4 complete of 4 (12 arm-runs recorded)
+- Unsealed final candidates: 12 (plus 36 checkpoint candidates)
 
 ## Cost
 

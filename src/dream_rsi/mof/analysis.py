@@ -83,6 +83,7 @@ def unseal_block(
     prepared_root: Path,
     runner_script: Path,
     workdir_root: Path,
+    labels: Mapping[str, float] | None = None,
     permutations: int = ROW_ORDER_PERMUTATIONS,
 ) -> list[UnsealResult]:
     """Grade every candidate this block froze, in one pass over the sealed pool.
@@ -104,7 +105,9 @@ def unseal_block(
         raise ValueError(f"block {record.get('run_id')} froze no candidate to unseal")
 
     pool = MofPool.final_test(prepared_root, split_seed=split_seed)
-    labels = pool.load_labels()
+    # Labels are supplied by the caller when they were read before the vault
+    # closed; only a caller that never sealed anything may read them here.
+    labels = dict(labels) if labels is not None else pool.load_labels()
     workdir = workdir_root / f"{record['run_id']}-unseal"
     evaluator = MofScreeningEvaluator(
         pool=pool, labels=labels, runner_script=runner_script,

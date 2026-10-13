@@ -100,6 +100,12 @@ Against the design's ceiling of 5,000,000 tokens per method per block, the highe
 arm spent 3.32 M (method C on one block); A and B stayed between 0.54 M and 0.99 M. The
 pilot's overall cap was 3 × 4 × 5 M = 60 M and it used 17.4 M.
 
+The cap is enforced by a reservation made *before* the call and refused rather than
+truncated, and the reservation proved to be a real upper bound: across all 1,091 requests
+none settled above its own reservation, the worst ratio being 0.861. That holds because
+reasoning tokens were zero — they are not inside the reservation — which is the condition
+recorded in `MOF_SCREENING_DESIGN.md` §5.4.
+
 ## Figures
 
 All five are in `docs/experiments/pilot/` as PNG, SVG and the CSV behind every series.
@@ -148,10 +154,16 @@ failed, and every request reported its usage.
 - Extended reasoning was fixed `off` across all arms. That is identical across arms and so
   does not affect the comparison, but it does mean the absolute scores describe this model
   configuration, not the model at its default effort.
-- The sealed test pool is now open for split seeds 101 and 211, and the formal phase would
-  reuse it. Running the formal phase after this one means the experimenter knows two of its
-  five splits' test outcomes in advance. Nothing here was used to tune anything, but it is a
-  real limitation of reusing the pool and belongs in the record.
+- **The sealed test pool is no longer blind to the experimenter, and this is the most
+  consequential limit here.** The five split seeds share one pool — 197 materials, one set
+  of files — so opening it for this pilot's candidates opened it for the pool the formal
+  phase was pre-registered to use. "The results were not used to tune anything" is not a
+  defence and should not be offered as one: after unsealing, the experimenter knows which
+  arm won on two of the five splits and by how much, and that knowledge shapes any protocol
+  revision made next — including the obvious one, since the arm this pilot shows overfitting
+  the development pool (C) is precisely the arm a re-frozen protocol would be tempted to
+  cut. Any formal result that reuses this pool is exploratory, not confirmatory. The
+  requirements before a formal phase are set out in `MOF_SCREENING_DESIGN.md` §8.
 
 ## Formal phase: measured, not run
 
@@ -165,8 +177,11 @@ on this machine, in this session:
   **150–200 M tokens**, inside the 900 M ceiling but far outside any single working session
 
 The design anticipated exactly this and requires the protocol to be re-frozen before the
-formal phase rather than started and quietly changed. The honest options are to run it over
-several days as a background job, or to revise the protocol first — most plausibly by
-cutting method C's serial depth, which dominates the wall clock and produced the worst
-sealed-pool results. **No re-frozen formal protocol has been written, and no formal block
-has been started.**
+formal phase rather than started and quietly changed. **No re-frozen formal protocol has
+been written, and no formal block has been started.**
+
+Affordability is the smaller of the two blockers. The larger one is above: the pool this
+phase opened is the pool the formal phase was pre-registered to use, so a formal run on it
+could not be reported as confirmatory whatever its result. Both prerequisites — an
+independent material pool, and a re-frozen protocol — are set out in
+`MOF_SCREENING_DESIGN.md` §8.
