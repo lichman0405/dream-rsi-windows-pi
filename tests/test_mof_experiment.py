@@ -591,3 +591,57 @@ def test_a_block_that_was_already_run_resumes_instead_of_respending(
     assert second.budget["limit"] == first.budget["limit"], (
         "the ceiling belongs to the run, not to the process continuing it"
     )
+
+
+def test_a_pause_marker_stops_the_phase_at_a_block_boundary(
+    tmp_path: Path, split_101: Path,
+) -> None:
+    """There has to be a way to stop a phase that is not killing it.
+
+    Killing a run that holds a sealed vault is the thing the vault exists to
+    survive, not something to do on purpose; `--block-limit` is read at start.
+    The marker is checked between blocks, so a phase stops with every finished
+    block committed and the vault closed in the ordinary way.
+    """
+    from dream_rsi.mof.experiment import MofExperimentRunner
+    from dream_rsi.mof.protocol import MethodSpec, PhaseSpec, Protocol, block_plans
+
+    spec = PhaseSpec(
+        key="acceptance", worlds=1, token_budget=200_000, session_cap=32,
+        split_seeds=(101,), repeats=(1, 2), checkpoints=(1_000,),
+        methods={
+            "A": MethodSpec(key="A", name="A", incumbent_policy="policies/incumbent.py",
+                            uses_developer=False, W=2, K1=1, M=1),
+            "B": MethodSpec(key="B", name="B", incumbent_policy="policies/incumbent.py",
+                            uses_developer=False, W=2, K1=1, M=1),
+            "C": MethodSpec(key="C", name="C", incumbent_policy="policies/serial.py",
+                            uses_developer=False, W=1, K1=1, M=1),
+        },
+    )
+    protocol = Protocol(phase="pilot", prepared_root=str(PREPARED), spec_override=spec)
+    runner = MofExperimentRunner(
+        project_root=Path.cwd(), protocol=protocol, task_dir=Path("tasks/mof_screening"),
+        runner_script=RUNNER, out_root=tmp_path,
+        backend_factory=lambda config, plan, budget: _ScriptedMofBackend(budget),
+        run_namespace="pause-", runtime_root=tmp_path / "runtime",
+    )
+    plans = block_plans("pilot")          # two blocks of three arms
+    labels = _pool_from(split_101, "pause-101").load_labels()
+    digest = _pool_from(split_101, "pause-101").data_digest()
+
+    # Stop the real runner's phase loop by giving every block the same body but
+    # marking the pause before the second block would start.
+    runner.pause_marker.write_text("stop", encoding="utf-8")
+    summary = runner.run_phase(plans, protect=[])
+    assert summary["blocks"] == [], (
+        "with the marker already present the phase must start nothing"
+    )
+    assert any("paused before" in note for note in summary["notes"]), summary["notes"]
+
+    runner.pause_marker.unlink()
+    first = runner.run_block(plans[0], labels=labels, pool_digest=digest)
+    assert first.status == "COMMITTED"
+    runner.pause_marker.write_text("stop", encoding="utf-8")
+    summary = runner.run_phase([plans[-1]], protect=[])
+    assert summary["blocks"] == [], "the marker must stop the next block too"
+    assert any("paused before" in note for note in summary["notes"])

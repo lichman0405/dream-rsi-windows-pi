@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..runtime.winjob import WindowsJob, terminate_tree
-from ..runtime.token_budget import ROLE_DISCOVERY, TokenBudget
+from ..runtime.token_budget import ROLE_DISCOVERY, TokenBudget, estimate_tokens
 
 #: The minimum environment a child needs to start and find its tools. Anything
 #: not listed here is dropped rather than inherited.
@@ -94,6 +94,7 @@ def run_pi_prompt(
     token_budget: TokenBudget | None = None,
     role: str = ROLE_DISCOVERY,
     max_output_bytes: int = 16384,
+    context_limit_tokens: int | None = None,
 ) -> PiSessionResult:
     """Run one prompt through Pi and return its final assistant text.
 
@@ -112,6 +113,18 @@ def run_pi_prompt(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     system_prompt = str(request.get("system_prompt") or "")
+    if context_limit_tokens is not None:
+        # A request larger than the window is rejected by the provider, which
+        # arrives as a bare agent error and takes the whole run down with it.
+        # Refusing it here makes it a recorded, explicable outcome instead.
+        needed = estimate_tokens(str(request.get("prompt") or ""), system_prompt,
+                                 max_output_bytes)
+        if needed > context_limit_tokens:
+            return PiSessionResult(
+                ok=False, error_type="CONTEXT_LIMIT_EXCEEDED",
+                error=(f"this request needs about {needed} tokens and the model's window "
+                       f"is {context_limit_tokens}; it was not sent"),
+            )
     grant = None
     if token_budget is not None:
         if not request.get("no_tools"):

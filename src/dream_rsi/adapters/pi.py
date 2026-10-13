@@ -75,6 +75,7 @@ class PiDiscoveryBackend:
         token_budget: TokenBudget | None = None,
         max_output_bytes: int = 32768,
         thinking: str | None = None,
+        context_limit_tokens: int | None = None,
     ) -> None:
         self.workdir_root = Path(workdir_root)
         self.provider = provider
@@ -88,6 +89,7 @@ class PiDiscoveryBackend:
         self.token_budget = token_budget
         self.max_output_bytes = int(max_output_bytes)
         self.thinking = thinking
+        self.context_limit_tokens = context_limit_tokens
 
     def preflight(self) -> None:
         if not shutil.which("pi"):
@@ -150,6 +152,7 @@ class PiDiscoveryBackend:
             memory_limit_mb=self.memory_limit_mb,
             token_budget=self.token_budget,
             max_output_bytes=self.max_output_bytes,
+            context_limit_tokens=self.context_limit_tokens,
         )
 
         duration = time.monotonic() - started

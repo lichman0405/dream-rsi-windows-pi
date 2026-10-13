@@ -253,6 +253,7 @@ class LlmPolicyDeveloper:
         token_budget: TokenBudget | None = None,
         max_output_bytes: int = 32768,
         thinking: str | None = None,
+        context_limit_tokens: int | None = None,
     ) -> None:
         if not provider or not model:
             raise ValueError(
@@ -269,6 +270,7 @@ class LlmPolicyDeveloper:
         self.token_budget = token_budget
         self.max_output_bytes = int(max_output_bytes)
         self.thinking = thinking
+        self.context_limit_tokens = context_limit_tokens
         #: One entry per call, kept so a run can report what it actually spent.
         self.sessions: list[dict[str, object]] = []
 
@@ -304,6 +306,7 @@ class LlmPolicyDeveloper:
             token_budget=self.token_budget,
             role=ROLE_POLICY_DEVELOPMENT,
             max_output_bytes=self.max_output_bytes,
+            context_limit_tokens=self.context_limit_tokens,
         )
         self.sessions.append({
             "iteration_t": iteration_t, "m": m, "attempt": attempt,

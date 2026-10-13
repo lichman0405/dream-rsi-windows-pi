@@ -78,6 +78,30 @@ THINKING = "off"
 #: The score's K, from §3.4 of the design.
 K = 10
 
+#: Which implementation of the algorithm produced a phase's numbers.
+#:
+#: Distinct from the protocol digest on purpose. The digest identifies the
+#: *parameters* -- arms, seeds, blocks, budgets -- and those did not change. This
+#: identifies the *implementation*, and that did: the first formal attempt wrote
+#: one full observation per decision step and its A arm was rejected by the
+#: provider for exceeding the context window. Revision 2 stores each node record
+#: once and refers to it by id.
+#:
+#: It is recorded in every phase record rather than folded into the digest,
+#: because folding it in would move the digest of phases that have already run;
+#: the pilot's 9f5940ed and formal v1's 10d9a668 both still reproduce from this
+#: code, and a reviewer can tell the two implementations apart by this field.
+#:
+#: 1 -- one full observation per decision step (trajectory format 2)
+#: 2 -- node records stored once, steps refer to them by id (format 3)
+IMPLEMENTATION_REVISION = 2
+
+#: The provider's context window, in tokens, for the model this protocol pins.
+#: Recorded because a request that exceeds it is rejected outright -- which is
+#: how the first formal A arm died -- so the runner has to know the number to
+#: refuse the call itself and record why.
+CONTEXT_LIMIT_TOKENS = 1_048_576
+
 #: Seed handed to candidates so their own splitting is deterministic. Fixed, not
 #: per-block: a candidate is a program, and giving it a different seed per block
 #: would make the paired comparison a comparison of two programs.
@@ -285,6 +309,12 @@ class Protocol:
             "dataset": DATASET,
             "model": MODEL,
             "thinking": THINKING,
+            # `context_limit_tokens` is deliberately absent, for the same reason
+            # as `total_token_cap`: it is a property of the pinned model, which
+            # this dict already names, so it adds no information the digest does
+            # not have -- and putting it in moved the digest of a phase that has
+            # already run. The number is recorded in the module and in the
+            # phase record instead.
             "pi_version": self.pi_version,
             "k": K,
             "candidate_seed": CANDIDATE_SEED,
@@ -321,7 +351,8 @@ __all__ = [
     "DEVELOPMENT_RESERVE_FRACTION", "EVALUATOR_MEMORY_MB", "EVALUATOR_TIMEOUT_S",
     "K", "LAMBDA_WEIGHT", "LIVE_RHO", "MODEL", "MethodSpec", "PHASES",
     "POLICY_MEMORY_MB", "POLICY_SELECT_TIMEOUT_S", "PRACTICAL_THRESHOLD",
-    "PhaseSpec", "Protocol", "RHO_GRID", "ROW_ORDER_PERMUTATIONS", "SPLIT_SEEDS",
+    "CONTEXT_LIMIT_TOKENS", "IMPLEMENTATION_REVISION", "PhaseSpec", "Protocol", "RHO_GRID",
+    "ROW_ORDER_PERMUTATIONS", "SPLIT_SEEDS",
     "THINKING",
     "block_plans", "development_reserve", "method_order",
 ]

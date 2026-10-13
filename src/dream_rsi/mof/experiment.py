@@ -56,6 +56,8 @@ from .protocol import (
     MODEL,
     POLICY_MEMORY_MB,
     POLICY_SELECT_TIMEOUT_S,
+    CONTEXT_LIMIT_TOKENS,
+    IMPLEMENTATION_REVISION,
     THINKING,
     Protocol,
     development_reserve,
@@ -122,6 +124,7 @@ class BlockRecord:
     baseline_S: float | None = None
     backend_id: str = ""
     budget_limit: int = 0
+    implementation_revision: int = 0
     budget: dict[str, Any] = field(default_factory=dict)
     ledger: dict[str, Any] = field(default_factory=dict)
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -234,6 +237,20 @@ class MofExperimentRunner:
 
     # ------------------------------------------------------------------ config
 
+    @property
+    def pause_marker(self) -> Path:
+        """A file whose presence stops the phase before the next block starts.
+
+        There was no way to stop a running phase at a safe point: the only
+        options were to let it run or to kill it, and killing a run holding a
+        sealed vault is exactly what nobody wants to do. Between blocks is the
+        natural boundary -- every block commits its own records and ledger and
+        the vault stays closed across the gap -- so the check goes there, and
+        the phase record says it stopped on the marker rather than on the
+        budget, so the two are never confused.
+        """
+        return self.out_root / f"{self.protocol.phase}.pause"
+
     def _run_id(self, plan: BlockPlan) -> str:
         return f"{self.run_namespace}{plan.run_id}"
 
@@ -299,6 +316,7 @@ class MofExperimentRunner:
             plan=plan_record, run_id=run_id, status="RUNNING",
             protocol_digest=self.protocol.digest,
         )
+        record.implementation_revision = IMPLEMENTATION_REVISION
         run_root = config.run_root(run_id)
         run_root.mkdir(parents=True, exist_ok=True)
 
@@ -361,7 +379,7 @@ class MofExperimentRunner:
                 timeout_s=AGENT_TIMEOUT_S, memory_limit_mb=AGENT_MEMORY_MB,
                 no_tools=True, response_only=True, standard_library_only=False,
                 token_budget=budget, max_output_bytes=MAX_OUTPUT_BYTES,
-                thinking=THINKING,
+                thinking=THINKING, context_limit_tokens=CONTEXT_LIMIT_TOKENS,
             )
         )
         record.backend_id = str(getattr(backend, "backend_id", "unknown"))
@@ -372,7 +390,7 @@ class MofExperimentRunner:
                 provider=MODEL["provider"], model=MODEL["model"],
                 timeout_s=AGENT_TIMEOUT_S, memory_limit_mb=AGENT_MEMORY_MB,
                 token_budget=budget, max_output_bytes=MAX_OUTPUT_BYTES,
-                thinking=THINKING,
+                thinking=THINKING, context_limit_tokens=CONTEXT_LIMIT_TOKENS,
             )
             if method.uses_developer else None
         )
@@ -581,6 +599,12 @@ class MofExperimentRunner:
                 # repeated resumes against the same block after interruptions.
                 # Each block's ledger is cumulative for that block alone, so the
                 # running total is a plain sum with no delta arithmetic.
+                if self.pause_marker.exists():
+                    phase_notes.append(
+                        f"paused before {plan.block_id}: {self.pause_marker.name} is present; "
+                        f"{len(plans) - len(records)} arm-run(s) not started"
+                    )
+                    break
                 if ceiling is not None and committed >= ceiling:
                     phase_notes.append(
                         f"phase token ceiling reached: {committed} committed of {ceiling}; "
@@ -603,6 +627,7 @@ class MofExperimentRunner:
         summary = {
             "phase": self.protocol.phase,
             "protocol_digest": self.protocol.digest,
+            "implementation_revision": IMPLEMENTATION_REVISION,
             "isolation": isolation,
             "phase_token_cap": ceiling,
             "phase_tokens_committed": committed,
