@@ -63,6 +63,39 @@ def estimate_tokens(prompt: str, system_prompt: str, max_output_bytes: int) -> i
     return math.ceil(ceiling / BYTES_PER_TOKEN_FLOOR) + PROTOCOL_ALLOWANCE
 
 
+#: The ledger row a settled call writes. Only these rows carry a ``seq``, so it
+#: is also the event ``_max_settled_seq`` looks for when a process resumes.
+REQUEST_EVENT = "request"
+
+
+def _max_settled_seq(ledger_path: Path | None) -> int:
+    """The highest ``seq`` a ledger already carries, or 0 for a fresh ledger.
+
+    Only ``request`` rows carry a ``seq``; a line that is not JSON, or not an
+    object, is skipped exactly as the read-only audit skips it -- this function
+    must never make a ledger unreadable by refusing to start.
+    """
+    if ledger_path is None or not Path(ledger_path).is_file():
+        return 0
+    highest = 0
+    try:
+        with Path(ledger_path).open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("event") == REQUEST_EVENT:
+                    seq = row.get("seq")
+                    if isinstance(seq, int) and not isinstance(seq, bool):
+                        highest = max(highest, seq)
+    except OSError:
+        return 0
+    return highest
+
+
 @dataclass(frozen=True)
 class Grant:
     call_id: str
@@ -114,7 +147,14 @@ class TokenBudget:
         self._reserved: dict[str, int] = {}
         self._spent = max(0, int(self.prior_spent))
         self._refusals = 0
-        self._calls = 0
+        #: ``seq`` is the join key between a cost row and the candidate it paid
+        #: for, so it must be unique *within the ledger*, not merely within one
+        #: process. A resumed run continues the ledger it already wrote; if the
+        #: counter restarted at 1, every row of the new session would collide
+        #: with the first session's rows of the same number, and the staircase
+        #: would plot one candidate's tokens against another's work. The ledger
+        #: is the run's own spend record, so it is the thing the counter follows.
+        self._calls = _max_settled_seq(self.ledger_path)
 
     # ------------------------------------------------------------------ reserve
 
@@ -165,7 +205,7 @@ class TokenBudget:
             self._calls += 1
             seq = self._calls
             self._write({
-                "event": "request",
+                "event": REQUEST_EVENT,
                 "seq": seq,
                 "call_id": grant.call_id,
                 "role": role,
@@ -299,7 +339,7 @@ def spend_from_ledger(path: Path) -> int:
 
 
 __all__ = [
-    "BYTES_PER_TOKEN_FLOOR", "Grant", "PROTOCOL_ALLOWANCE", "ROLE_DISCOVERY",
-    "ROLE_POLICY_DEVELOPMENT", "Settlement", "TokenBudget", "estimate_tokens",
+    "BYTES_PER_TOKEN_FLOOR", "PROTOCOL_ALLOWANCE", "REQUEST_EVENT", "ROLE_DISCOVERY",
+    "ROLE_POLICY_DEVELOPMENT", "Grant", "Settlement", "TokenBudget", "estimate_tokens",
     "spend_from_ledger",
 ]

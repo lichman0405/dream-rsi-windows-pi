@@ -88,6 +88,24 @@ APPROVED_FAILURE_SHA256 = \
 INITIAL_B_START = "2026-10-14T12:14:19+08:00"
 MAX_ELAPSED = timedelta(hours=24)
 
+#: The pinned dataset archive, and the digest the protocol names for it. The
+#: vault can only take what is on disk; a protected set that lost its archive
+#: would still "seal" -- over the wrong files -- so its presence is asserted
+#: before any arm starts.
+PINNED_ARCHIVE = REPO / RAW_DIR / "CRAFTED-2.0.1.verified.tar.xz"
+PINNED_ARCHIVE_SHA256 = \
+    "f29f7b3d6b7d6c51fd113138bc4a811c448d4dcce66ed37fddbfa4141a238dde"
+
+#: The record of what was lost and how it was restored, written once by the
+#: recovery pass. When it exists the protected set must match it exactly.
+RECOVERY_RECORD = OUT_ROOT / "vault-recovery.json"
+
+#: An approval to resume one partially run arm in place. Without an entry here
+#: that matches the arm's own partial state, a partially run arm still blocks
+#: the phase -- silence is not permission.
+RESUME_APPROVALS = OUT_ROOT / f"{PHASE}.resume-approvals.json"
+LOCK_ARCHIVE = OUT_ROOT / f"{PHASE}.controller.lock.stale"
+
 CHINA = timezone(timedelta(hours=8))
 INDEX_BAD_LINES: list[int] = []
 STATE: dict = {
@@ -189,17 +207,102 @@ def blocker(operation: str) -> int:
 # ------------------------------------------------------------------------- lock
 
 
-def acquire_lock() -> str | None:
-    """Atomically take the controller lock, or return None if one exists."""
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    token = uuid.uuid4().hex
+def pid_exists(pid: int) -> bool:
+    """Whether a process with this pid is running. Never signals anything."""
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    import ctypes
+    SYNCHRONIZE = 0x00100000
+    WAIT_TIMEOUT = 0x00000102
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+    if not handle:
+        return False
     try:
-        handle = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
+        return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def live_controller_pids() -> set[int] | None:
+    """Pids whose command line is this controller running ``--execute``.
+
+    ``None`` means the probe could not answer, and every caller must then treat
+    the lock as live: an unanswerable question is not evidence of absence.
+    """
+    if os.name != "nt":
         return None
-    with os.fdopen(handle, "w", encoding="utf-8") as stream:
-        stream.write(json.dumps({"token": token, "pid": os.getpid(), "at": now_iso()}) + "\n")
-    return token
+    script = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -match '^py' -and "
+        "$_.CommandLine -match 'mof_ab_continue\\.py' -and "
+        "$_.CommandLine -match '--execute' } | "
+        "ForEach-Object { $_.ProcessId }")
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return {int(token) for token in (result.stdout or "").split() if token.isdigit()}
+
+
+def lock_owner_alive(data: dict) -> bool:
+    pid = data.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return False
+    live = live_controller_pids()
+    if live is None:
+        return pid_exists(pid)
+    return pid in live
+
+
+def archive_stale_lock(data: dict) -> None:
+    """Move a dead controller's lock aside, bytes kept, reason recorded."""
+    stamp = datetime.now(CHINA).strftime("%Y%m%dT%H%M%S")
+    target = LOCK_ARCHIVE.with_name(f"{LOCK_ARCHIVE.name}-{stamp}")
+    try:
+        LOCK_PATH.replace(target)
+    except OSError:
+        return
+    write_json(target.with_name(target.name + ".json"),
+               {"reason": "the recorded controller pid is not a live controller",
+                "archived_at": now_iso(), "lock": data})
+    STATE.setdefault("stale_locks", []).append(
+        {"at": now_iso(), "file": str(target), "lock": data})
+
+
+def acquire_lock() -> str | None:
+    """Atomically take the controller lock; a dead controller's lock is archived first.
+
+    A lock whose controller is gone is not authority to stay blocked -- the
+    process it recorded is not coming back -- and it is not deleted either: its
+    bytes are archived beside the phase with the reason, so the interruption it
+    records stays readable. A lock whose controller is alive still refuses.
+    """
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        token = uuid.uuid4().hex
+        try:
+            handle = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            data = read_json(LOCK_PATH) or {}
+            if lock_owner_alive(data):
+                return None
+            archive_stale_lock(data)
+            continue
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps({"token": token, "pid": os.getpid(), "at": now_iso()}) + "\n")
+        return token
+    return None
 
 
 def release_lock(token: str) -> None:
@@ -227,26 +330,55 @@ def registry_column(query: str, run_id: str) -> list:
 
 
 def world_report(run_id: str, method: str) -> tuple[list[str], dict]:
-    """World and revision facts for one arm, read without touching the database."""
+    """World, round and revision facts for one arm, read without touching the database.
+
+    A world row is not a round. An arm interrupted before a world sealed is
+    resumed by quarantining that world and building its round again under a new
+    id (``-r1``), which is the resume path's own design -- so the row count can
+    exceed the round count for a reason the phase created, not hid. What the
+    phase requires is unchanged: exactly one sealed, scoreable world for each of
+    its outer rounds, no gaps, and nothing left building. A quarantined retry is
+    reported as a recorded fact rather than counted as a missing or extra world.
+    """
     spec = PHASES[PHASE]
     problems: list[str] = []
-    facts: dict = {"worlds": 0, "sealed": 0, "revisions": 0}
+    facts: dict = {"worlds": 0, "sealed": 0, "rounds": 0, "quarantined": 0, "revisions": 0}
     try:
-        states = [str(row[0]) for row in
-                  registry_column("select state from worlds where run_id = ?", run_id)]
+        rows = [(str(row[0]), int(row[1]), str(row[2])) for row in registry_column(
+            "select world_id, outer_t, state from worlds where run_id = ?", run_id)]
         payloads = [row[0] for row in
                     registry_column("select payload from revisions where run_id = ?", run_id)]
-    except (sqlite3.Error, OSError, ValueError):
+    except (sqlite3.Error, OSError, ValueError, TypeError):
         return [f"{run_id}: the registry could not be read read-only"], facts
 
-    sealed = [state for state in states if state == "SEALED_SCOREABLE"]
-    facts["worlds"] = len(states)
-    facts["sealed"] = len(sealed)
+    by_round: dict[int, list[tuple[str, str]]] = {}
+    for world_id, outer_t, state in rows:
+        by_round.setdefault(outer_t, []).append((world_id, state))
+    facts["worlds"] = len(rows)
     facts["revisions"] = len(payloads)
-    if len(states) != spec.worlds:
-        problems.append(f"{run_id}: {len(states)} of {spec.worlds} worlds")
-    if len(sealed) != len(states):
-        problems.append(f"{run_id}: {len(sealed)} of {len(states)} worlds scoreable")
+    facts["quarantined"] = sum(1 for _, _, state in rows if state == "QUARANTINED")
+    facts["quarantine_detail"] = [{"world_id": world_id, "outer_t": outer_t}
+                                  for world_id, outer_t, state in rows
+                                  if state == "QUARANTINED"]
+
+    sealed_rounds = 0
+    for outer_t in sorted(by_round):
+        entries = by_round[outer_t]
+        sealed_here = [world_id for world_id, state in entries if state == "SEALED_SCOREABLE"]
+        unexpected = [(world_id, state) for world_id, state in entries
+                      if state not in ("SEALED_SCOREABLE", "QUARANTINED")]
+        if not 0 <= outer_t < spec.worlds:
+            problems.append(f"{run_id}: a world sits at outer round {outer_t}")
+        if len(sealed_here) > 1:
+            problems.append(f"{run_id}: {len(sealed_here)} sealed worlds at round {outer_t}")
+        if sealed_here:
+            sealed_rounds += 1
+        if unexpected:
+            problems.append(f"{run_id}: {unexpected[0][0]} is {unexpected[0][1]} at round {outer_t}")
+    facts["sealed"] = sealed_rounds
+    facts["rounds"] = sum(1 for outer_t in by_round if 0 <= outer_t < spec.worlds)
+    if sealed_rounds != spec.worlds:
+        problems.append(f"{run_id}: {sealed_rounds} of {spec.worlds} outer rounds sealed scoreable")
 
     if method == "A":
         statuses = []
@@ -375,6 +507,119 @@ def isolation_problems(isolation: dict, label: str) -> list[str]:
     return problems
 
 
+def partial_fingerprint(run_id: str) -> str | None:
+    """A digest of the partial state an in-place resume would reuse or discard.
+
+    Approval is granted to a state, not to a name: the worlds, their rounds and
+    states, the revisions and the run's own state are all hashed, so resuming
+    after the state moved on is a different question and needs a different
+    answer. Returns None when the state cannot be read.
+    """
+    try:
+        worlds = registry_column(
+            "select world_id, outer_t, state from worlds where run_id = ?", run_id)
+        revisions = registry_column(
+            "select iteration_t, m, status from revisions where run_id = ?", run_id)
+        runs = registry_column("select state from runs where run_id = ?", run_id)
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+    payload = {
+        "run_id": run_id,
+        "run_state": str(runs[0][0]) if runs else None,
+        "worlds": sorted([[str(w[0]), int(w[1]), str(w[2])] for w in worlds]),
+        "revisions": sorted([[int(r[0]), int(r[1]), str(r[2])] for r in revisions]),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def partial_state_facts(run_id: str) -> dict:
+    """A read-only summary of an interrupted arm's state, without judging it.
+
+    An arm that has not finished has no block record, so the record-based
+    verification is not available for it; this is what can be said instead, and
+    every value is read, never inferred.
+    """
+    try:
+        worlds = registry_column(
+            "select world_id, outer_t, state from worlds where run_id = ?", run_id)
+        revisions = registry_column("select status from revisions where run_id = ?", run_id)
+        runs = registry_column("select state from runs where run_id = ?", run_id)
+    except (sqlite3.Error, OSError, ValueError):
+        return {"run_id": run_id, "readable": False}
+    return {
+        "run_id": run_id,
+        "readable": True,
+        "run_state": str(runs[0][0]) if runs else None,
+        "worlds": [{"world_id": str(world[0]), "outer_t": int(world[1]), "state": str(world[2])}
+                   for world in worlds],
+        "revision_statuses": sorted(str(row[0]) for row in revisions),
+        "fingerprint": partial_fingerprint(run_id),
+    }
+
+
+def resume_approvals() -> dict[str, dict]:
+    """Recorded approvals to resume one partially run arm in place, by run id."""
+    data = read_json(RESUME_APPROVALS) or {}
+    approvals: dict[str, dict] = {}
+    entries = data.get("approvals")
+    if isinstance(entries, list):
+        for item in entries:
+            if isinstance(item, dict) and item.get("run_id"):
+                approvals[str(item["run_id"])] = item
+    return approvals
+
+
+def protected_paths() -> list[Path]:
+    """The same expansion the vault seals: every protected path that exists."""
+    return default_protected_paths(_prepared(REPO), dataset_root=REPO / DATA_DIR,
+                                   raw_root=REPO / RAW_DIR)
+
+
+def protected_set_report(*, hash_archive: bool) -> tuple[list[str], dict]:
+    """What the vault would actually take, checked before any arm starts.
+
+    Sealing takes what is on disk, so a half-restored protected set would seal
+    quietly -- over fewer files -- and the arm would run with labels and the
+    pinned archive missing rather than with an unsealed vault. This is the check
+    that refuses that: every protected family must hold files, the pinned
+    archive must be present (and, in execute mode, hash-verified), and when a
+    recovery record exists the set must match it exactly.
+    """
+    problems: list[str] = []
+    facts: dict = {"families": [], "files": 0, "bytes": 0}
+    files: list[Path] = []
+    for path in protected_paths():
+        if path.is_dir():
+            members = sorted(entry for entry in path.rglob("*") if entry.is_file())
+        else:
+            members = [path]
+        family = {"path": str(path), "files": len(members),
+                  "bytes": sum(entry.stat().st_size for entry in members)}
+        facts["families"].append(family)
+        facts["files"] += family["files"]
+        facts["bytes"] += family["bytes"]
+        files.extend(members)
+        if not members:
+            problems.append(f"{path}: no files; the vault would seal this family empty")
+
+    if not PINNED_ARCHIVE.is_file():
+        problems.append(f"the pinned archive is missing: {PINNED_ARCHIVE}")
+    elif hash_archive:
+        actual = sha256_file(PINNED_ARCHIVE)
+        facts["pinned_archive_sha256"] = actual
+        if actual != PINNED_ARCHIVE_SHA256:
+            problems.append("the pinned archive's digest differs from the protocol's")
+
+    record = read_json(RECOVERY_RECORD)
+    if record is not None:
+        facts["recovery_record"] = str(RECOVERY_RECORD)
+        if record.get("files") != facts["files"] or record.get("bytes") != facts["bytes"]:
+            problems.append(
+                f"the protected set holds {facts['files']} files / {facts['bytes']} bytes; "
+                f"the recovery record holds {record.get('files')} / {record.get('bytes')}")
+    return problems, facts
+
+
 def arm_report(run_id: str, method: str) -> tuple[list[str], dict]:
     """Everything the controller asserts about one arm. Read-only."""
     problems: list[str] = []
@@ -474,9 +719,23 @@ def phase_preconditions(plans: list) -> tuple[list[str], dict[str, dict], list[d
         problems.append(f"{run_id}: a run in the index is not in the frozen plan")
 
     rows = plan_rows(plans, records)
+    approvals = resume_approvals()
     for row in rows:
-        if row["state"] == "partial":
+        if row["state"] != "partial":
+            continue
+        approval = approvals.get(row["run_id"])
+        if approval is None:
             problems.append(f"{row['run_id']}: partially run; not resumed")
+            continue
+        actual = partial_fingerprint(row["run_id"])
+        if actual is None:
+            problems.append(f"{row['run_id']}: the partial state could not be read")
+        elif approval.get("partial_fingerprint") != actual:
+            problems.append(f"{row['run_id']}: the partial state differs from the approved "
+                            f"resume fingerprint")
+        else:
+            row["resume_approved"] = True
+            row["resume_approval"] = approval.get("authority")
 
     previous = read_json(PHASE_JSON)
     if previous is None:
@@ -491,6 +750,9 @@ def preflight(plans: list) -> tuple[list[str], dict[str, dict], list[dict]]:
     problems, records, rows = phase_preconditions(plans)
     if (records.get(APPROVED_RUN_ID) or {}).get("status") != "COMMITTED":
         problems.append(f"{APPROVED_RUN_ID}: initial B is not committed")
+    protected_problems, protected_facts = protected_set_report(hash_archive=True)
+    STATE["protected_set"] = protected_facts
+    problems += protected_problems
     return problems, records, rows
 
 
@@ -819,6 +1081,33 @@ def finalise(plans: list) -> int:
     return 0
 
 
+def recovery_section() -> str:
+    """The vault-loss disclosure, from the recovery record when one exists."""
+    record = read_json(RECOVERY_RECORD)
+    if record is None:
+        return ""
+    lines = [
+        "\n## Vault recovery (2026-10-14)\n",
+        "- The search controller was killed by an external event on 2026-10-14 "
+        "(last write 16:31:45 +08:00); the vault keeper died with it, so the "
+        "sealed files were not restored by the normal path.",
+        f"- Recovery method: the protected set was regenerated and verified, not "
+        f"restored from the keeper's memory. {record.get('method', '')}",
+        f"- Restored protected set: {record.get('files')} files, "
+        f"{record.get('bytes')} bytes"
+        + (f"; the pre-incident set was {record.get('incident_files')} files, "
+           f"{record.get('incident_bytes')} bytes" if record.get("incident_files") else "")
+        + ".",
+    ]
+    for item in record.get("unrecoverable") or []:
+        lines.append(f"- Not restorable: {item}")
+    for item in record.get("checks") or []:
+        lines.append(f"- Check: {item}")
+    lines.append(f"- Record: `{RECOVERY_RECORD.name}` beside this file; every hash "
+                 f"above was recomputed, not copied.")
+    return "\n".join(lines) + "\n"
+
+
 def annotate_unsealed() -> None:
     """Attach the accounting caveat to the unsealed outputs. Values untouched."""
     exceptions = accounting_exceptions()
@@ -826,6 +1115,7 @@ def annotate_unsealed() -> None:
 
     summary = UNSEALED / "summary.md"
     with summary.open("a", encoding="utf-8") as handle:
+        handle.write(recovery_section())
         handle.write(
             "\n## Parameter deviation\n\n"
             "The executed replay horizon was K2=6 for every arm, matching the existing "
@@ -853,6 +1143,9 @@ def annotate_unsealed() -> None:
             data = None
         if isinstance(data, dict):
             data["accounting_exceptions"] = exceptions
+            recovery = read_json(RECOVERY_RECORD)
+            if recovery is not None:
+                data["vault_recovery"] = recovery
             data["execution_parameter_deviations"] = [{
                 "parameter": "K2", "planned": 12, "executed": K2,
                 "scope": "all ab arms and existing runner",
@@ -911,7 +1204,16 @@ def check_only() -> int:
     arms: list[dict] = []
     for row in rows:
         entry: dict = {"run_id": row["run_id"], "block": row["block_id"],
-                       "method": row["method"], "state": row["state"]}
+                       "method": row["method"], "state": row["state"],
+                       "resume_approved": bool(row.get("resume_approved"))}
+        if row["state"] == "partial":
+            # No block record exists yet -- that is what "partial" means -- so
+            # the read-only state summary stands in for it, alongside the
+            # approval that is required before it may be resumed in place.
+            entry["partial_state"] = partial_state_facts(row["run_id"])
+            entry["resume_approval_authority"] = row.get("resume_approval")
+            arms.append(entry)
+            continue
         if row["state"] != "pending":
             arm_problems, facts = arm_report(row["run_id"], row["method"])
             ledger = facts.get("ledger_facts") or {}
@@ -924,6 +1226,11 @@ def check_only() -> int:
             problems += arm_problems
         arms.append(entry)
 
+    protected_problems, protected_facts = protected_set_report(hash_archive=False)
+    problems += protected_problems
+    deferred.append("the pinned archive's digest is not computed in this mode; "
+                    "execution verifies it before any arm")
+
     report = {
         "mode": "check-only",
         "phase": PHASE,
@@ -933,7 +1240,10 @@ def check_only() -> int:
         "pause_marker": PAUSE_MARKER.exists(),
         "lock_present": LOCK_PATH.exists(),
         "arm_plan": arms,
-        "arms_that_would_run": [a["run_id"] for a in arms if a["state"] == "pending"],
+        "arms_that_would_run": [a["run_id"] for a in arms
+                                if a["state"] in ("pending", "partial")],
+        "resume_approvals_recorded": sorted(resume_approvals()),
+        "protected_set": protected_facts,
         "problems": problems,
         "deferred": deferred,
         "wrote": "nothing", "model_calls": 0, "pi_calls": 0, "lock_acquired": False,

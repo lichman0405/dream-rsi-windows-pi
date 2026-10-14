@@ -914,3 +914,50 @@ def test_a_two_arm_block_runs_end_to_end_and_never_invents_a_third_arm(
     assert all(world["state"] in ("SEALED_SCOREABLE", "SEALED_UNSCOREABLE")
                for record in records for world in record.worlds)
     assert not any(record.plan["method"] == "C" for record in records)
+
+
+# --------------------------------------------------------------- ledger sessions
+
+
+def test_a_resumed_ledger_resolves_each_world_to_the_session_that_built_it() -> None:
+    """A ledger's ``seq`` is unique per session, and a resume can repeat numbers.
+
+    A process that restarts the search appends to a ledger another process
+    already wrote, and the older ledgers repeat the first session's sequence
+    numbers. Resolving a finding through a flat ``{seq: row}`` index would then
+    hand it another candidate's tokens -- so rows are split at every reset of
+    the number, and a finding is resolved through the session that was writing
+    when its world was created.
+    """
+    from dream_rsi.mof.experiment import LedgerIndex
+
+    rows = [
+        {"event": "request", "seq": 1, "at": "2026-10-14T15:27:12+0800",
+         "charged": 4294, "call_id": "first-1"},
+        {"event": "request", "seq": 2, "at": "2026-10-14T15:27:46+0800",
+         "charged": 4544, "call_id": "first-2"},
+        {"event": "request", "seq": 1, "at": "2026-10-14T17:35:17+0800",
+         "charged": 3862, "call_id": "second-1"},
+        {"event": "request", "seq": 2, "at": "2026-10-14T17:35:56+0800",
+         "charged": 3937, "call_id": "second-2"},
+        {"event": "request", "seq": 3, "at": "2026-10-14T17:41:00+0800",
+         "charged": 8787, "call_id": "second-3"},
+    ]
+    index = LedgerIndex(rows)
+    assert index.session_count == 2
+    before_reset = "2026-10-14T07:26:44.846407+00:00"    # 15:26:44 +0800
+    after_reset = "2026-10-14T09:35:00.553165+00:00"     # 17:35:00 +0800
+
+    assert index.charge_row(1, world_created_at=before_reset)["call_id"] == "first-1"
+    assert index.charge_row(2, world_created_at=before_reset)["call_id"] == "first-2"
+    assert index.charge_row(1, world_created_at=after_reset)["call_id"] == "second-1"
+    assert index.charge_row(3, world_created_at=after_reset)["call_id"] == "second-3"
+    # A number only one session wrote resolves for that session and nowhere else.
+    assert index.charge_row(3, world_created_at=before_reset) is None
+    assert index.charge_row(None, world_created_at=before_reset) is None
+
+    # A ledger that never restarted is exactly the flat index it replaces.
+    flat = LedgerIndex(rows[:2])
+    assert flat.session_count == 1
+    assert flat.charge_row(2, world_created_at=after_reset)["call_id"] == "first-2"
+    assert flat.charge_row(3, world_created_at=after_reset) is None

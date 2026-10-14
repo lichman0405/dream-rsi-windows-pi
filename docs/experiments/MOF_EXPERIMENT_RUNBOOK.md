@@ -146,3 +146,70 @@ historical phases. The design's tables stated 12 for formal/ab (8 for pilot);
 those planned values were not implemented. Continuing uses the existing value
 6 for every arm. This discrepancy must be stated in the final report; it is
 not evidence that the original parameter table was satisfied.
+
+### Interrupted arm, vault loss and recovery (2026-10-14)
+
+At 16:31:45 +08:00 the controller (`mof-ab-s101-r1-A` mid-round-3) and its vault
+keeper were both terminated by an external event that left no trace in any
+recoverable log: no pause marker, no controller-error status, an empty stderr
+log, no reboot and no scheduled task. The cause is recorded as unexplained. The
+keeper holds the sealed bytes only in memory, so the 4,089 protected files did
+not return to disk and the recorded 247,516,539-byte set was gone.
+
+**Recovery.** The set was regenerated from the pinned public sources and
+verified, not restored from the keeper: the Zenodo archive was re-downloaded
+(md5 `e11e4f84…` and sha256 `f29f7b3d…` both match the pinned values), `data/`
+was re-extracted with the recorded tar pattern list (2,714 CIFs, 1,357
+isotherms, the two RAC frames, README and LICENSE = 4,075 files), and
+`private/` plus every `splits/*/evaluator_private/` was re-derived with
+`scripts/prepare_crafted_mof_splits.py`. The decisive check: the recomputed
+`MofScreeningEvaluator` spec digest for split 101 equals the digest recorded
+when `mof-ab-s101-r1-B` ran — that digest hashes the private development
+targets, so the regenerated labels are byte-identical to what the arm was
+scored against. The details, the per-family counts and the one thing that could
+not be restored (two duplicate 55,404,888-byte downloads from an interrupted
+curl resume, never read by any experiment step) are in
+`experiment/ab/vault-recovery.json`.
+
+The protected set is therefore 4,087 files / 136,706,763 bytes rather than
+4,089 / 247,516,539, and every vault cycle from here on seals that smaller,
+fully verified set. `tools/mof_ab_continue.py` refuses to start an arm unless
+the pinned archive is present with the protocol's digest, every protected
+family holds files, and — when `vault-recovery.json` exists — the set matches
+it exactly.
+
+**Resuming a partially run arm.** The runner resumes an interrupted block in
+place: sealed worlds are reused after their digests are re-verified, the
+interrupted world is quarantined, and its round is rebuilt fresh under a `-r1`
+id. That makes the arm's *row* count exceed its *round* count, so both the
+controller's world report and `tools/mof_gate.py` judge per outer round (one
+sealed, scoreable world each) and disclose the quarantined retry rather than
+counting it. A partially run arm is not resumed silently: it needs an entry in
+`experiment/ab/ab.resume-approvals.json` whose `partial_fingerprint` matches
+the arm's current partial state, and the approval stops matching the moment
+that state changes.
+
+**Surviving a kill.** `tools/mof_ab_supervise.py` restarts the controller when
+it dies without recording a reason and stops on the first clean exit, pause
+marker or completed unseal — at most eight attempts. It carries no policy of
+its own and never signals anything. A stale controller lock (its recorded pid
+no longer a live controller) is archived beside the phase with its bytes and
+the reason, never deleted.
+
+**The ledger's `seq` across a resume (found and fixed while resuming).** The
+first resumed session revealed that `seq` — the join key between a cost row and
+the candidate it paid for — was numbered per process, so a resumed process
+wrote rows repeating the first session's numbers, and a flat `{seq: row}` index
+would hand a finding another candidate's tokens. The counter now continues from
+the highest number the ledger already carries
+(`src/dream_rsi/runtime/token_budget.py`), and findings are resolved through
+`LedgerIndex` (`src/dream_rsi/mof/experiment.py`), which splits a ledger at
+every reset and matches a finding to the session that was writing when its
+world was created. The resumed session had already written 21 such rows before
+the fix; they belong to the second interrupted world, which is quarantined and
+contributes no findings, and every duplicated number resolves to the first
+session for every sealed world. The exact call ids, windows and impact are in
+`.runtime/runs/mof-ab-s101-r1-A/ledger-seq-reconciliation.json`; no ledger row
+was edited. The second stop itself was deliberate — an operator stop to make
+that fix before more colliding rows could be written — and the keeper restored
+the vault on the way out, as designed.

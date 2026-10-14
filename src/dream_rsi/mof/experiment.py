@@ -30,6 +30,7 @@ import json
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -139,11 +140,82 @@ class BlockRecord:
         return dict(self.__dict__)
 
 
-def _read_ledger(path: Path) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+def _parse_when(value: Any) -> datetime | None:
+    """Parse a ledger ``at`` or a registry ``created_at``; None if it cannot be."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+class LedgerIndex:
+    """One run's cost rows, indexed by the session that wrote them.
+
+    ``seq`` numbers a call inside the *process that wrote it*, and a resumed run
+    appends to the ledger a killed process left behind -- so a ledger can hold
+    two rows with the same number, one from each session, and a flat
+    ``{seq: row}`` index would silently keep whichever came last. This splits
+    the rows at every reset of the sequence number -- exactly where a counter
+    restarted -- into the sessions that wrote them, and resolves a finding
+    through the session whose timestamps contain the world that produced it,
+    which is the session that built that world.
+
+    A ledger with no reset has exactly one session and this behaves as the flat
+    index it replaces; every run that never restarted stays bit-for-bit the same.
+    """
+
+    def __init__(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        sessions: list[dict[int, dict[str, Any]]] = []
+        last_seq = 0
+        for row in rows:
+            if row.get("event") != "request":
+                continue
+            seq = row.get("seq")
+            if not isinstance(seq, int) or isinstance(seq, bool):
+                continue
+            if not sessions or seq <= last_seq:
+                sessions.append({})
+            sessions[-1][seq] = dict(row)
+            last_seq = seq
+        self._sessions = sessions
+        self._ends: list[datetime | None] = []
+        for session in sessions:
+            stamps = [ _parse_when(row.get("at")) for row in session.values() ]
+            stamps = [stamp for stamp in stamps if stamp is not None]
+            self._ends.append(max(stamps) if stamps else None)
+
+    @property
+    def session_count(self) -> int:
+        return len(self._sessions)
+
+    def _session_for(self, when: datetime | None) -> int:
+        """The session that was writing at ``when``: the last one whose end is
+        not before it. Sessions partition the timeline, so the final session
+        owns everything after the previous session stopped."""
+        if when is None:
+            return 0
+        chosen = 0
+        for index, end in enumerate(self._ends):
+            if end is None or end <= when:
+                chosen = min(index + 1, len(self._sessions) - 1)
+            else:
+                break
+        return chosen
+
+    def charge_row(self, seq: int | None, *, world_created_at: Any = None) -> dict[str, Any] | None:
+        """The request row that paid for ``seq`` in the world's own session."""
+        if seq is None or not self._sessions:
+            return None
+        return self._sessions[self._session_for(_parse_when(world_created_at))].get(seq)
+
+
+def _read_ledger(path: Path) -> tuple[LedgerIndex, list[dict[str, Any]]]:
     """Index the cost ledger by settle order, and return its raw rows."""
     rows: list[dict[str, Any]] = []
     if not path.is_file():
-        return {}, rows
+        return LedgerIndex(rows), rows
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -154,7 +226,7 @@ def _read_ledger(path: Path) -> tuple[dict[int, dict[str, Any]], list[dict[str, 
             except json.JSONDecodeError:
                 continue
             rows.append(row)
-    return {int(row["seq"]): row for row in rows if row.get("event") == "request"}, rows
+    return LedgerIndex(rows), rows
 
 
 def _ledger_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -420,11 +492,11 @@ class MofExperimentRunner:
         finally:
             registry.close()
 
-        charge_by_seq, ledger_rows = _read_ledger(run_root / "cost-ledger.jsonl")
+        charge_index, ledger_rows = _read_ledger(run_root / "cost-ledger.jsonl")
         record.ledger = _ledger_summary(ledger_rows)
         record.budget = budget.snapshot()
 
-        findings = self._collect_findings(config, charge_by_seq)
+        findings = self._collect_findings(config, charge_index)
         record.findings = [finding.to_dict() for finding in findings]
         frozen = self._freeze(plan, config, baseline.score, findings, run_id)
         record.frozen = [candidate.to_dict() for candidate in frozen]
@@ -436,7 +508,7 @@ class MofExperimentRunner:
     # ------------------------------------------------------------------ findings
 
     def _collect_findings(
-        self, config: Config, charge_by_seq: Mapping[int, Mapping[str, Any]],
+        self, config: Config, charge_index: LedgerIndex,
     ) -> list[Finding]:
         """Every non-root candidate, ordered by the ledger row that paid for it.
 
@@ -466,7 +538,7 @@ class MofExperimentRunner:
                     generation_record = (generation or {}).get("record") or {}
                     seq = generation_record.get("ledger_seq")
                     seq = int(seq) if isinstance(seq, int) else None
-                    row = charge_by_seq.get(seq) if seq is not None else None
+                    row = charge_index.charge_row(seq, world_created_at=world.created_at)
                     charged = int(row.get("charged") or 0) if row else 0
                     usage_reported = bool(row.get("usage_reported")) if row else False
                     workspace = workspaces.get(node.node_id, "")

@@ -13,7 +13,10 @@ Usage::
 Conditions, all read from the records rather than from the console:
 
 * every arm the phase registers is ``COMMITTED``;
-* each arm finished the full eight outer worlds, all sealed and scoreable;
+* each arm finished the full eight outer rounds, each holding exactly one
+  sealed, scoreable world -- a world quarantined by an interrupted resume is
+  disclosed and its rebuilt round counted once, never as an extra or missing
+  world (the requirement is unchanged; only the row-versus-round accounting is);
 * no policy-development revision was cut off by the context ceiling;
 * no call was refused by the token ceiling, and no request failed -- counted
   over every registered arm's ledger, and not reduced by the single approval
@@ -141,14 +144,38 @@ try:
     run_ids = {m: run_id_for(BLOCK, m) for m in ARMS}
     for method, run_id in run_ids.items():
         worlds = registry.list_worlds(run_id)
-        sealed = [w for w in worlds if w.state.value == "SEALED_SCOREABLE"]
-        check(len(worlds) == spec.worlds,
-              f"{method} has {len(worlds)} of {spec.worlds} outer worlds")
-        check(len(sealed) == len(worlds),
-              f"{method}: {len(sealed)} of {len(worlds)} worlds are scoreable")
+        # A world row is not a round. An arm interrupted before a world sealed
+        # is resumed by quarantining that world and rebuilding its round under a
+        # new id, so the row count can exceed the round count for a reason the
+        # resume path itself created. The requirement is unchanged: exactly one
+        # sealed, scoreable world in each of the phase's outer rounds, nothing
+        # left building. A quarantined retry is disclosed, not recounted.
+        by_round: dict[int, list] = {}
+        for world in worlds:
+            by_round.setdefault(world.outer_t, []).append(world)
+        sealed_rounds = 0
+        for outer_t in sorted(by_round):
+            entries = by_round[outer_t]
+            sealed_here = [w for w in entries if w.state.value == "SEALED_SCOREABLE"]
+            other = [w for w in entries
+                     if w.state.value not in ("SEALED_SCOREABLE", "QUARANTINED")]
+            if len(sealed_here) > 1:
+                check(False, f"{method}: {len(sealed_here)} sealed worlds at round {outer_t}")
+            if other:
+                check(False, f"{method}: round {outer_t} holds {other[0].world_id} "
+                             f"in state {other[0].state.value}")
+            if len(sealed_here) == 1 and not other:
+                sealed_rounds += 1
+        check(sealed_rounds == spec.worlds,
+              f"{method} has {sealed_rounds} of {spec.worlds} sealed scoreable outer rounds")
+        quarantined = [w for w in worlds if w.state.value == "QUARANTINED"]
+        if quarantined:
+            notes.append(
+                f"{method} carries {len(quarantined)} quarantined world(s) from an "
+                f"interrupted resume ({', '.join(w.world_id for w in quarantined)}); "
+                f"each round was rebuilt fresh and is counted once")
         arm_complete[method] = (committed[method]
-                                and len(worlds) == spec.worlds
-                                and len(sealed) == len(worlds))
+                                and sealed_rounds == spec.worlds)
     # A-specific, and it stays that way: only A registers a policy developer.
     if "A" in run_ids:
         revisions = registry.list_revisions(run_ids["A"])

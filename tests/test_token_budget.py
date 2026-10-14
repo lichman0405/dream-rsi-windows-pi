@@ -177,3 +177,43 @@ def test_a_phase_ceiling_is_the_sum_of_the_arm_ceilings() -> None:
     assert (formal.methods["C"].W, formal.methods["C"].K1) == (1, 96)
     assert formal.split_seeds == (101, 211, 307, 401, 503)
     assert formal.repeats == (1, 2)
+
+
+def test_a_resumed_ledger_continues_the_sequence_instead_of_restarting_it(tmp_path) -> None:
+    """``seq`` joins a cost row to the candidate it paid for, so it must be
+    unique within the ledger -- not merely within one process.
+
+    A resumed run that renumbered from 1 would write rows colliding with the
+    first session's, and the quality staircase would plot one candidate's
+    tokens against another's work. The counter follows the ledger it writes.
+    """
+    ledger = tmp_path / "cost-ledger.jsonl"
+    first = TokenBudget(limit=1_000_000, ledger_path=ledger)
+    seqs = []
+    for _ in range(3):
+        grant = _reserve(first)
+        assert grant is not None
+        seqs.append(first.settle(grant, {"total": 1_000, "reported_messages": 1},
+                                 role=ROLE_DISCOVERY, duration_s=1.0, ok=True).seq)
+    assert seqs == [1, 2, 3]
+
+    resumed = TokenBudget(limit=1_000_000, ledger_path=ledger, prior_spent=3_000)
+    grant = _reserve(resumed)
+    assert grant is not None
+    settlement = resumed.settle(grant, {"total": 1_000, "reported_messages": 1},
+                                role=ROLE_DISCOVERY, duration_s=1.0, ok=True)
+    assert settlement.seq == 4, "the resumed process must continue, not renumber"
+
+    # A fresh ledger still starts at 1, and a malformed line must not stop it.
+    fresh = TokenBudget(limit=1_000_000, ledger_path=tmp_path / "new.jsonl")
+    grant = _reserve(fresh)
+    assert grant is not None
+    assert fresh.settle(grant, {"total": 1_000, "reported_messages": 1},
+                        role=ROLE_DISCOVERY, duration_s=1.0, ok=True).seq == 1
+
+    ledger.write_text(ledger.read_text(encoding="utf-8") + "not json\n", encoding="utf-8")
+    tolerant = TokenBudget(limit=1_000_000, ledger_path=ledger)
+    grant = _reserve(tolerant)
+    assert grant is not None
+    assert tolerant.settle(grant, {"total": 1_000, "reported_messages": 1},
+                           role=ROLE_DISCOVERY, duration_s=1.0, ok=True).seq == 5
