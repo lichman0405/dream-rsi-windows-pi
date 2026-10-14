@@ -51,9 +51,10 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 # directory must not change which module is imported.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dream_rsi.mof.protocol import PHASES          # noqa: E402
+from mof_ledger_audit import audit_ledger  # noqa: E402
+
+from dream_rsi.mof.protocol import PHASES  # noqa: E402
 from dream_rsi.storage.sqlite_registry import Registry  # noqa: E402
-from mof_ledger_audit import audit_ledger          # noqa: E402
 
 PHASE = sys.argv[1] if len(sys.argv) > 1 else "formal2"
 
@@ -82,7 +83,7 @@ if index.is_file():
 
 check(set(records) == set(ARMS),
       f"{len(records)} of {len(ARMS)} registered arms present for {BLOCK}: {sorted(records)}")
-committed = {method: False for method in ARMS}
+committed = dict.fromkeys(ARMS, False)
 for method in ARMS:
     row = records.get(method)
     if row is None:
@@ -95,7 +96,7 @@ for method in ARMS:
 # down can ask whether the arm has stopped. A reservation that outlives its arm
 # is a hole in the ceiling accounting; one still open while the arm runs is just
 # the newest call.
-arm_complete: dict[str, bool] = {method: False for method in ARMS}
+arm_complete: dict[str, bool] = dict.fromkeys(ARMS, False)
 registry = Registry(".runtime/registry.sqlite3")
 try:
     # block_id is "<phase>-s<seed>-r<repeat>"; the run id is "mof-<phase>-s<seed>-r<rep>-<arm>"
