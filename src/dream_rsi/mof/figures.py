@@ -1,6 +1,6 @@
 """Paper-style figures for the MOF screening experiment.
 
-Five figures, following the v2 result figures' logic rather than their task:
+Six figures, following the v2 result figures' logic rather than their task:
 
 1. **Quality-budget staircase** -- development best-so-far ``S`` against
    cumulative Pi tokens, one trajectory per paired run, with the outer worlds
@@ -13,6 +13,8 @@ Five figures, following the v2 result figures' logic rather than their task:
    ten, against the random, ridge and random-forest references.
 5. **Internal mechanism** -- Eq(1) ``V`` and tree best-so-far ``S`` by outer
    round. Captioned as an internal policy signal, never as screening evidence.
+6. **Cost comparison** -- tokens charged and service requests per arm per paired
+   block, against the shared per-arm ceiling. Equal allowance is not equal use.
 
 Every figure is written as PNG for reading and SVG for reuse, and every plotted
 series is also written as CSV so a reader can re-derive the picture.
@@ -360,13 +362,86 @@ def policy_value_curve(score_rows: Sequence[Mapping[str, Any]], out_dir: Path) -
     return _save(fig, out_dir, "fig5b_policy_value", rows)
 
 
+def cost_comparison(blocks: Sequence[Mapping[str, Any]], out_dir: Path) -> dict[str, str]:
+    """What each arm actually spent, in tokens and in service requests.
+
+    The design's main comparison holds the *allowed* budget equal -- one arm per
+    block, each with its own hard ceiling. Equal allowance is not equal use, so
+    the cost side has to be shown rather than assumed: a difference bought with
+    markedly fewer tokens is a different claim from the same difference bought
+    with more, and a reader cannot tell which they are looking at without this.
+    """
+    plt = _matplotlib()
+    rows: list[dict[str, Any]] = []
+    for row in blocks:
+        ledger = row.get("ledger") or {}
+        tokens = int(ledger.get("charged_total") or 0)
+        requests = int(ledger.get("requests") or 0)
+        rows.append({
+            "run_id": row.get("run_id"), "method": row["plan"]["method"],
+            "split_seed": row["plan"]["split_seed"], "repeat": row["plan"]["repeat"],
+            "block_id": row["plan"]["block_id"], "tokens": tokens, "requests": requests,
+            "tokens_per_request": (tokens / requests) if requests else 0.0,
+            "ceiling": int(row.get("budget_limit") or 0),
+        })
+    if not rows:
+        fig, ax = plt.subplots(figsize=(7.6, 4.2))
+        ax.text(0.5, 0.5, "no block records", ha="center", va="center")
+        return _save(fig, out_dir, "fig6_cost_comparison", rows)
+
+    block_ids = sorted({str(r["block_id"]) for r in rows})
+    methods = [m for m in ("A", "B", "C") if any(r["method"] == m for r in rows)]
+    positions = {block: index for index, block in enumerate(block_ids)}
+    width = 0.8 / max(len(methods), 1)
+
+    fig, (left, right) = plt.subplots(1, 2, figsize=(9.6, 4.3))
+    for offset, method in enumerate(methods):
+        style = ARM_STYLE[method]
+        xs, tokens, requests = [], [], []
+        for block in block_ids:
+            mine = [r for r in rows if r["method"] == method and str(r["block_id"]) == block]
+            if not mine:
+                continue
+            xs.append(positions[block] + (offset - (len(methods) - 1) / 2) * width)
+            tokens.append(sum(r["tokens"] for r in mine) / 1e6)
+            requests.append(sum(r["requests"] for r in mine))
+        left.bar(xs, tokens, width=width * 0.9, color=style["color"],
+                 label=f"{method}", zorder=2)
+        right.bar(xs, requests, width=width * 0.9, color=style["color"],
+                  label=f"{method}", zorder=2)
+
+    ceilings = {r["ceiling"] for r in rows if r["ceiling"]}
+    if len(ceilings) == 1:
+        ceiling = ceilings.pop() / 1e6
+        left.axhline(ceiling, color="#c1440e", linewidth=0.9, linestyle="--", zorder=1)
+        left.text(0.01, ceiling, f" per-arm ceiling {ceiling:.0f}M", fontsize=7.2,
+                  color="#c1440e", va="bottom", transform=left.get_yaxis_transform())
+
+    for axis, title, ylabel in ((left, "Tokens actually charged", "tokens (millions)"),
+                                (right, "Service requests", "requests")):
+        axis.set_xticks(range(len(block_ids)))
+        axis.set_xticklabels(block_ids, fontsize=7.5, rotation=8)
+        axis.set_ylabel(ylabel, fontsize=8)
+        axis.grid(alpha=0.25, linewidth=0.6, axis="y")
+        axis.tick_params(labelsize=8)
+        axis.set_title(title, fontsize=10)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=ARM_STYLE[m]["color"],
+                             label=ARM_STYLE[m]["label"]) for m in methods]
+    left.legend(handles=handles, fontsize=7.2, frameon=False, loc="lower right")
+    _caption(fig, "One bar per arm per paired block. Every arm is given the same hard "
+                  "per-arm ceiling; these are what they spent of it. Tokens are the "
+                  "provider's reported usage, and the provider reports no per-request "
+                  "money, so no currency figure is shown.")
+    return _save(fig, out_dir, "fig6_cost_comparison", rows)
+
+
 def write_references(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
 
 
 __all__ = [
-    "ARM_STYLE", "internal_mechanism", "paired_final_comparison", "policy_value_curve",
-    "quality_budget_staircase", "recommendation_explanation", "recursive_dynamics",
-    "write_references",
+    "ARM_STYLE", "cost_comparison", "internal_mechanism", "paired_final_comparison",
+    "policy_value_curve", "quality_budget_staircase", "recommendation_explanation",
+    "recursive_dynamics", "write_references",
 ]

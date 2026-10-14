@@ -337,7 +337,7 @@ def test_block_pipeline_records_ledger_findings_and_freezing(
 
 
 def test_every_figure_renders_with_its_source_data(tmp_path: Path) -> None:
-    """Five figures, each with a PNG, an SVG and the CSV behind it.
+    """Six figures, each with a PNG, an SVG and the CSV behind it.
 
     The report is a deliverable, not a side effect, so it gets a test that fails
     when a figure stops rendering rather than being discovered after a phase has
@@ -351,13 +351,16 @@ def test_every_figure_renders_with_its_source_data(tmp_path: Path) -> None:
         "run_id": f"mof-pilot-s101-r1-{method}",
         "plan": {"method": method, "split_seed": 101, "repeat": 1, "block_id": "b"},
         "baseline_S": 0.58,
+        "budget_limit": 5_000_000,
+        "ledger": {"charged_total": 4_100_000 - 100_000 * index,
+                   "requests": 60 + index, "tokens": {"total": 4_100_000}},
         "findings": [{"cumulative": (index + 1) * 5300, "score": 0.58 + 0.02 * index,
                       "outer_t": index // 6, "round_index": index % 6,
                       "ledger_seq": index + 1, "charged": 5300} for index in range(12)],
         "worlds": [{"outer_t": t, "s_best": 0.6 + 0.02 * t, "b_count": 5,
                     "state": "SEALED_SCOREABLE", "node_count": 6, "world_digest": "x",
                     "policy_version_id": "p", "replay_worlds_available": 0} for t in range(2)],
-    } for method in ("A", "B", "C")]
+    } for index, method in enumerate(("A", "B", "C"))]
 
     unsealed = [
         UnsealResult(
@@ -388,6 +391,7 @@ def test_every_figure_renders_with_its_source_data(tmp_path: Path) -> None:
             [row.to_dict() for row in unsealed],
             {"random": {"mean_S": 0.43}, "ridge": {"Q": 4.9}, "random_forest": {"Q": 5.8}}, out),
         "mechanism": figures.internal_mechanism(blocks, out),
+        "cost": figures.cost_comparison(blocks, out),
     }
     for name, paths in produced.items():
         for kind in ("png", "svg", "csv"):

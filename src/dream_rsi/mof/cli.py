@@ -27,6 +27,7 @@ from .analysis import (
 )
 from .experiment import MofExperimentRunner, default_protected_paths
 from .figures import (
+    cost_comparison,
     internal_mechanism,
     paired_final_comparison,
     quality_budget_staircase,
@@ -399,6 +400,7 @@ def cmd_mof_report(args: Any) -> int:
     if blocks:
         figures["quality_budget_staircase"] = quality_budget_staircase(blocks, fig_dir)
         figures["internal_mechanism"] = internal_mechanism(blocks, fig_dir)
+        figures["cost_comparison"] = cost_comparison(blocks, fig_dir)
     table: dict[str, Any] = {}
     if unsealed:
         table = paired_table(unsealed, expected_arms=expected_arms,
