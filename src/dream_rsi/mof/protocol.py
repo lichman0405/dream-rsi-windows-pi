@@ -133,6 +133,20 @@ class PhaseSpec:
     repeats: tuple[int, ...]
     checkpoints: tuple[int, ...]
     methods: Mapping[str, MethodSpec]
+    #: How the paired table may be read.
+    #:
+    #: ``preregistered`` applies the design's §6.2 rule, which asks for a
+    #: direction consistent in >= 4 of 5 splits. ``descriptive`` says the phase
+    #: is deliberately too small for that rule to mean anything: it reports the
+    #: paired differences, their mean and an interval, and issues no verdict.
+    #: Applying a "4/5 splits" reading to a two-split phase would dress two
+    #: numbers up as a pre-registered test, which is exactly the claim the small
+    #: phase cannot support.
+    #:
+    #: Deliberately *not* part of the protocol digest: this field changes how a
+    #: finished phase is narrated, never what was run. Folding it in would move
+    #: the digest of phases that have already produced records.
+    reading_mode: str = "preregistered"
 
     @property
     def blocks(self) -> int:
@@ -151,8 +165,8 @@ class PhaseSpec:
         return len(self.methods) * self.blocks * self.token_budget
 
 
-def _methods(*, w: int, k1: int, a_M: int, c_k1: int) -> dict[str, MethodSpec]:
-    """The three arms. ``c_k1`` is separate because the design fixes it per phase.
+def _methods(*, w: int, k1: int, a_M: int, c_k1: int, include_c: bool = True) -> dict[str, MethodSpec]:
+    """The arms. ``c_k1`` is separate because the design fixes it per phase.
 
     The design's parameter table gives method C ``K1 = 64`` for the pilot and
     ``96`` for the formal phase -- C is serial, so its depth *is* its budget in a
@@ -160,15 +174,23 @@ def _methods(*, w: int, k1: int, a_M: int, c_k1: int) -> dict[str, MethodSpec]:
     formal phase with the pilot's search depth, which is the kind of silent
     deviation from the frozen protocol that the whole pre-registration exists to
     prevent.
+
+    ``include_c=False`` drops the auxiliary arm and keeps A and B byte-identical
+    to the three-arm phases, so a two-arm phase differs from the full design in
+    exactly one documented way. It is not a way to save time on the primary
+    comparison, which never involved C.
     """
-    return {
+    methods = {
         "A": MethodSpec(key="A", name="dream_rsi", incumbent_policy="policies/incumbent.py",
                         uses_developer=True, W=w, K1=k1, M=a_M),
         "B": MethodSpec(key="B", name="frozen_initial", incumbent_policy="policies/incumbent.py",
                         uses_developer=False, W=w, K1=k1, M=1),
-        "C": MethodSpec(key="C", name="frozen_serial", incumbent_policy="policies/serial.py",
-                        uses_developer=False, W=1, K1=c_k1, M=1),
     }
+    if include_c:
+        methods["C"] = MethodSpec(key="C", name="frozen_serial",
+                                  incumbent_policy="policies/serial.py",
+                                  uses_developer=False, W=1, K1=c_k1, M=1)
+    return methods
 
 
 #: Development splits, in the order the design fixes them (`101, 211, 307, 401,
@@ -202,6 +224,28 @@ PHASES: Mapping[str, PhaseSpec] = {
         split_seeds=SPLIT_SEEDS, repeats=(1, 2),
         checkpoints=(1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000, 30_000_000),
         methods=_methods(w=8, k1=12, a_M=3, c_k1=96),
+    ),
+    #: A deliberately small A-versus-B phase: two splits, one repeat, no C.
+    #:
+    #: It exists because the full ten-block phase costs 161-361 hours, which no
+    #: available working window covers, and because the primary comparison it
+    #: was designed around -- learned policy against frozen policy -- never
+    #: involved arm C. Everything that decides what a run *is* is unchanged from
+    #: ``formal``: same 8 outer worlds, same A/B ``W = 8`` and ``K1 = 12``, same
+    #: ``M = 3``, same 30M per arm per block, same checkpoints, same model, same
+    #: scoring and candidate-selection rules. Only the replication is smaller.
+    #:
+    #: The two costs of dropping C are stated where they belong rather than
+    #: hidden here: the phase cannot speak to search order at ``W = 1``, and with
+    #: two splits it cannot carry the design's ">= 4/5 splits" reading at all --
+    #: hence ``reading_mode="descriptive"``.
+    "ab": PhaseSpec(
+        key="ab", worlds=8,
+        token_budget=30_000_000, session_cap=768,
+        split_seeds=SPLIT_SEEDS[:2], repeats=(1,),
+        checkpoints=(1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000, 30_000_000),
+        methods=_methods(w=8, k1=12, a_M=3, c_k1=96, include_c=False),
+        reading_mode="descriptive",
     ),
 }
 
@@ -260,18 +304,22 @@ class BlockPlan:
 
 
 def method_order(phase: str, split_seed: int, repeat: int) -> tuple[str, ...]:
-    """A fixed, pre-registered execution order for one block's three arms.
+    """A fixed, pre-registered execution order for one block's arms.
 
     The design asks for the arm order inside a block to be randomised in advance
     to spread service-side drift. "In advance" has to mean *derivable*: the order
     is a hash of the block's identity, so it is not chosen after seeing anything,
     it is reproducible by a reviewer, and it is recorded in the block record.
+
+    The keys come from the phase's own method table, so a phase that runs two
+    arms orders two arms. Three-arm phases are unaffected: their sorted key list
+    is still ``["A", "B", "C"]`` and the digest bytes are unchanged.
     """
     digest = hashlib.sha256(
         f"dream-rsi-mof-order|{phase}|{split_seed}|{repeat}".encode("utf-8")
     ).digest()
-    keys = ["A", "B", "C"]
-    ordered = sorted(range(3), key=lambda index: (digest[index], keys[index]))
+    keys = sorted(PHASES[phase].methods)
+    ordered = sorted(range(len(keys)), key=lambda index: (digest[index], keys[index]))
     return tuple(keys[index] for index in ordered)
 
 

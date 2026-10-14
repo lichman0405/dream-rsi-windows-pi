@@ -16,7 +16,9 @@ from pathlib import Path
 
 import pytest
 
+from dream_rsi.mof.analysis import UnsealResult
 from dream_rsi.mof.protocol import (
+    PHASES,
     MethodSpec,
     PhaseSpec,
     Protocol,
@@ -737,3 +739,174 @@ def test_the_pause_marker_is_checked_at_every_block_boundary(
     runner.pause_marker.unlink()
     summary = runner.run_phase(rest, protect=[])
     assert len(summary["blocks"]) == len(rest)
+
+
+# ----------------------------------------------------------- the two-arm phase
+
+
+def _unseal_row(method: str, split_seed: int, *, test_S: float,
+                development_S: float = 0.80) -> UnsealResult:
+    """One final candidate as the unseal pass would record it."""
+    return UnsealResult(
+        run_id=f"mof-ab-s{split_seed}-r1-{method}", method=method,
+        split_seed=split_seed, repeat=1, checkpoint=30_000_000, is_final=True,
+        origin="baseline", candidate_sha256="0" * 64, development_S=development_S,
+        test_S=test_S, test_Q=1.0, test_Q_star=2.0, recommended_uptakes=[1.0],
+        top_k_uptakes=[1.0], high_performer_hits=0, high_performer_cutoff=1,
+        contract_status="OK", error_type=None, duration_s=1.0, permutation_agreement=[],
+    )
+
+
+def test_the_ab_phase_runs_two_arms_of_the_frozen_design() -> None:
+    """The small phase may shrink replication; it may not reshape an arm.
+
+    A and B must be the same programs under the same parameters as in the full
+    phase, or the two would not be measuring the same comparison.
+    """
+    from dream_rsi.mof.protocol import PHASES
+
+    ab, formal = PHASES["ab"], PHASES["formal"]
+    assert sorted(ab.methods) == ["A", "B"], "this phase registers no auxiliary arm"
+    for arm in ("A", "B"):
+        got, want = ab.methods[arm], formal.methods[arm]
+        assert (got.W, got.K1, got.M) == (want.W, want.K1, want.M)
+        assert got.incumbent_policy == want.incumbent_policy
+        assert got.uses_developer == want.uses_developer
+    assert ab.worlds == formal.worlds == 8
+    assert ab.methods["A"].M == 3
+    assert ab.token_budget == formal.token_budget == 30_000_000
+    assert ab.checkpoints == formal.checkpoints
+    assert ab.split_seeds == (101, 211) and ab.repeats == (1,)
+    assert ab.blocks == 2
+    assert ab.session_cap == ab.worlds * ab.methods["A"].K1 * ab.methods["A"].W
+
+
+def test_the_ab_phase_has_its_own_identity() -> None:
+    from dream_rsi.mof.cli import _prepared
+    from dream_rsi.mof.protocol import PHASES
+
+    prepared = str(_prepared(Path.cwd()))
+    ids = {phase: {plan.run_id for plan in block_plans(phase)}
+           for phase in ("pilot", "formal", "formal2", "ab")}
+    assert all(run_id.startswith("mof-ab-") for run_id in ids["ab"])
+    for other in ("pilot", "formal", "formal2"):
+        assert ids["ab"].isdisjoint(ids[other])
+
+    digests = {phase: Protocol(phase=phase, prepared_root=prepared).digest
+               for phase in ids}
+    assert digests["ab"] != digests["formal2"]
+    # The phases that already produced records still reproduce from this code.
+    assert digests["pilot"] == (
+        "9f5940ed36ffbedf3b4ce3a6f43a4d65ee07435df1a4727f15e6c9620430b0f8"
+    )
+    assert digests["formal"] == (
+        "10d9a668af73d64281bc3301b90cac7e8b44cb18bee7346fe9769ece9cb2c603"
+    )
+    assert PHASES["ab"].reading_mode == "descriptive"
+
+
+def test_the_reading_mode_changes_the_narrative_and_not_the_digest() -> None:
+    """It is deliberately outside the digest: it never changes what was run."""
+    base = Protocol(phase="ab", prepared_root=str(PREPARED))
+    flipped = Protocol(
+        phase="ab", prepared_root=str(PREPARED),
+        spec_override=replace(base.spec, reading_mode="preregistered"),
+    )
+    assert flipped.digest == base.digest
+
+
+def test_a_two_arm_phase_orders_only_the_arms_it_has() -> None:
+    for phase in ("pilot", "formal", "formal2", "ab"):
+        expected = sorted(PHASES[phase].methods)
+        by_block: dict[str, list[str]] = {}
+        for plan in block_plans(phase):
+            by_block.setdefault(plan.block_id, []).append(plan.method)
+        for methods in by_block.values():
+            assert sorted(methods) == expected
+    assert sorted(method_order("ab", 101, 1)) == ["A", "B"]
+
+
+def test_a_block_is_complete_against_its_own_arm_set() -> None:
+    """A missing-by-design arm is not a missing-by-failure one."""
+    from dream_rsi.mof.analysis import paired_table
+
+    rows = [
+        _unseal_row("A", 101, test_S=0.90), _unseal_row("B", 101, test_S=0.80),
+        _unseal_row("A", 211, test_S=0.88), _unseal_row("B", 211, test_S=0.86),
+    ]
+    table = paired_table(rows, expected_arms=("A", "B"), reading_mode="descriptive")
+    assert table["blocks"] == 2
+    assert table["complete_blocks"] == 2
+    assert table["expected_arms"] == ["A", "B"]
+    assert [row["A_minus_B"] for row in table["rows"]] == pytest.approx([0.10, 0.02])
+    assert table["A_minus_B"]["mean"] == pytest.approx(0.06)
+    assert table["A_minus_B"]["splits"] == [101, 211]
+    assert not table["A_minus_C"]["available"], "no C ran, so there is no A-C contrast"
+
+
+def test_the_small_phase_cannot_earn_the_preregistered_verdict() -> None:
+    """The guard is on the split count as well as on the declared mode.
+
+    A "4/5 splits" rule applied to two splits would read as a pre-registered
+    test that came out negative, when no such test was run -- and a
+    ``worth_further_validation`` on two blocks would be worse.
+    """
+    from dream_rsi.mof.analysis import verdict_from_ci
+
+    flattering = {"available": True, "mean": 0.09, "ci95": [0.02, 0.16],
+                  "consistent_direction": 2, "splits": [101, 211]}
+    small = verdict_from_ci(flattering)
+    assert small["verdict"] == "descriptive_only"
+    assert small["registered_rule_applies"] is False
+    assert small["splits_total"] == 2
+    # The arithmetic is still reported: a reader gets the numbers, not a verdict.
+    assert small["mean"] == pytest.approx(0.09)
+    assert small["ci95"] == [0.02, 0.16]
+    assert small["practical_threshold"] == 0.05
+
+    five = {**flattering, "consistent_direction": 5,
+            "splits": [101, 211, 307, 401, 503]}
+    assert verdict_from_ci(five)["verdict"] == "worth_further_validation"
+    assert verdict_from_ci(five)["registered_rule_applies"] is True
+
+
+def test_a_two_arm_block_runs_end_to_end_and_never_invents_a_third_arm(
+    tmp_path: Path, split_101: Path,
+) -> None:
+    """The runner's own view of a block, with no C anywhere in the record."""
+    from dream_rsi.mof.experiment import MofExperimentRunner
+
+    spec = PhaseSpec(
+        key="acceptance", worlds=1, token_budget=200_000, session_cap=32,
+        split_seeds=(101,), repeats=(1,), checkpoints=(1_000,),
+        methods={
+            method: MethodSpec(key=method, name=method,
+                               incumbent_policy="policies/incumbent.py",
+                               uses_developer=False, W=2, K1=1, M=1)
+            for method in ("A", "B")
+        },
+        reading_mode="descriptive",
+    )
+    protocol = Protocol(phase="ab", prepared_root=str(PREPARED), spec_override=spec)
+    runner = MofExperimentRunner(
+        project_root=Path.cwd(), protocol=protocol, task_dir=Path("tasks/mof_screening"),
+        runner_script=RUNNER, out_root=tmp_path,
+        backend_factory=lambda config, plan, budget: _ScriptedMofBackend(budget),
+        run_namespace="two-arm-", runtime_root=tmp_path / "runtime",
+    )
+    pool = _pool_from(split_101, "two-arm-101")
+    labels, digest = pool.load_labels(), pool.data_digest()
+    plans = [p for p in block_plans("ab") if p.block_id == "ab-s101-r1"]
+    assert sorted(p.method for p in plans) == ["A", "B"]
+
+    records = [runner.run_block(plan, labels=labels, pool_digest=digest) for plan in plans]
+    assert [record.status for record in records] == ["COMMITTED", "COMMITTED"]
+    assert {record.plan["method"] for record in records} == {"A", "B"}
+    assert all(record.budget_limit == 200_000 for record in records)
+    assert all(len(record.worlds) == 1 for record in records)
+    # The scripted backend's candidate never scores above zero, so the world
+    # seals UNSCOREABLE rather than SCOREABLE; either way it is sealed, which is
+    # what says the two-arm block ran to its end.
+    assert all(world["state"] in ("SEALED_SCOREABLE", "SEALED_UNSCOREABLE")
+               for record in records for world in record.worlds)
+    assert not any(record.plan["method"] == "C" for record in records)

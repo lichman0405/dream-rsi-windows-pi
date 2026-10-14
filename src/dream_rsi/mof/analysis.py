@@ -238,8 +238,21 @@ def cluster_bootstrap_ci(
     }
 
 
-def verdict_from_ci(summary: Mapping[str, Any]) -> dict[str, Any]:
-    """Apply the design's pre-registered reading to a paired A-B summary."""
+def verdict_from_ci(
+    summary: Mapping[str, Any], *,
+    mode: str = "preregistered", required_splits: int = 5,
+) -> dict[str, Any]:
+    """Apply the design's pre-registered reading to a paired A-B summary.
+
+    ``mode="descriptive"`` is for a phase that is deliberately too small to carry
+    the rule. It still reports the mean, the interval, the per-split values and
+    how many splits fell A's way -- the arithmetic is the same -- but it issues
+    no verdict, because "consistent in >= 4 of 5 splits" is not a test a
+    two-split phase can pass or fail. Reporting such a phase as
+    ``insufficient_evidence`` would be worse than saying nothing: it reads as a
+    run of the pre-registered test that came out negative, when no such test was
+    run.
+    """
     if not summary.get("available"):
         return {"verdict": "no_evidence", "reason": "no paired runs to compare"}
     low, high = summary["ci95"]
@@ -247,6 +260,23 @@ def verdict_from_ci(summary: Mapping[str, Any]) -> dict[str, Any]:
     consistent = int(summary["consistent_direction"])
     total = len(summary["splits"])
     crosses_zero = low <= 0.0 <= high
+    if mode == "descriptive" or total < required_splits:
+        return {
+            "verdict": "descriptive_only",
+            "reason": (f"the pre-registered reading needs {required_splits} splits; this "
+                       f"phase has {total}, so it reports the paired differences and no "
+                       "verdict"),
+            "mean": mean,
+            "ci95": [low, high],
+            "practical_threshold": PRACTICAL_THRESHOLD,
+            "splits_favouring_A": consistent,
+            "splits_total": total,
+            "crosses_zero": crosses_zero,
+            "registered_rule_applies": False,
+            "rules": (f"not applied: the design's rule (A-B >= {PRACTICAL_THRESHOLD} S units, "
+                      f"same direction in >= 4/5 splits, interval excluding 0) presumes the "
+                      f"five-split phase"),
+        }
     if mean >= PRACTICAL_THRESHOLD and consistent >= 4 and not crosses_zero:
         verdict = "worth_further_validation"
     elif crosses_zero:
@@ -263,15 +293,25 @@ def verdict_from_ci(summary: Mapping[str, Any]) -> dict[str, Any]:
         "splits_favouring_A": consistent,
         "splits_total": total,
         "crosses_zero": crosses_zero,
+        "registered_rule_applies": True,
         "rules": ("pre-registered: A-B >= 0.05 S units, same direction in >= 4/5 splits, "
                   "and an exploratory interval that does not cross 0"),
     }
 
 
 def paired_table(
-    unsealed: Sequence[UnsealResult],
+    unsealed: Sequence[UnsealResult], *,
+    expected_arms: Sequence[str] = ("A", "B", "C"),
+    reading_mode: str = "preregistered",
 ) -> dict[str, Any]:
-    """Group unsealed runs into the block-level paired table the design asks for."""
+    """Group unsealed runs into the block-level paired table the design asks for.
+
+    ``expected_arms`` is what a *complete* block must contain for this phase. It
+    is a parameter because a phase that never registers an arm must not report
+    every one of its blocks as incomplete: a missing-by-design arm is not a
+    missing-by-failure one.
+    """
+    expected = set(expected_arms)
     by_block: dict[tuple[int, int], dict[str, UnsealResult]] = {}
     for result in unsealed:
         # One row per arm: the candidate the arm is actually judged on. The
@@ -284,7 +324,7 @@ def paired_table(
     rows: list[dict[str, Any]] = []
     for (split_seed, repeat), arms in sorted(by_block.items()):
         row: dict[str, Any] = {"split_seed": split_seed, "repeat": repeat,
-                               "complete": set(arms) == {"A", "B", "C"}}
+                               "complete": set(arms) == expected}
         for key, result in sorted(arms.items()):
             row[f"{key}_test_S"] = result.test_S
             row[f"{key}_test_Q"] = result.test_Q
@@ -312,17 +352,19 @@ def paired_table(
         "rows": rows,
         "complete_blocks": sum(1 for row in rows if row["complete"]),
         "blocks": len(rows),
+        "expected_arms": sorted(expected),
+        "reading_mode": reading_mode,
         "A_minus_B": ab,
         "A_minus_C": ac,
-        "A_minus_B_verdict": verdict_from_ci(ab),
-        "A_minus_C_verdict": verdict_from_ci(ac),
+        "A_minus_B_verdict": verdict_from_ci(ab, mode=reading_mode),
+        "A_minus_C_verdict": verdict_from_ci(ac, mode=reading_mode),
     }
 
 
 def development_test_gap(unsealed: Sequence[UnsealResult]) -> dict[str, Any]:
     """How much of each arm's development score survives contact with the pool."""
     out: dict[str, Any] = {}
-    for method in ("A", "B", "C"):
+    for method in sorted({r.method for r in unsealed if r.is_final}):
         rows = [r for r in unsealed if r.method == method and r.is_final]
         if not rows:
             continue

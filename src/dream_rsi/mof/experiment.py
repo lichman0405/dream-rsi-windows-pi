@@ -1,10 +1,11 @@
 """Run one phase of the MOF screening experiment, block by block.
 
-A *block* is one ``(phase, split seed, repeat)`` pair and it runs three arms --
-A (Dream-RSI), B (frozen initial policy), C (frozen serial policy) -- one after
-another. The block is also the statistical unit: the design counts paired search
-runs, never nodes or materials, and this module is careful to keep that
-distinction visible in what it writes.
+A *block* is one ``(phase, split seed, repeat)`` pair and it runs the phase's
+registered arms -- A (Dream-RSI), B (frozen initial policy) and, in the phases
+that register it, C (frozen serial policy) -- one after another. The block is
+also the statistical unit: the design counts paired search runs, never nodes or
+materials, and this module is careful to keep that distinction visible in what
+it writes.
 
 What one block does:
 

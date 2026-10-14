@@ -76,3 +76,40 @@ soon as the parent's pipe closes -- including after a hard kill, which is tested
 If a keeper is itself killed, the sealed files are lost from disk; they are
 regenerable from the pinned Zenodo archive plus `scripts/prepare_crafted_mof_splits.py`,
 and the vault manifest records exactly which paths were taken.
+
+## The reduced A/B phase (`ab`)
+
+`ab` is the frozen two-arm phase from §10 of the design: splits 101 and 211, one
+repeat, A and B only. It runs the design's primary comparison and nothing else.
+Its digest is `a07196279bf61523…`; it carries its own run ids (`mof-ab-…`), its
+own output directory (`.runtime/mof_experiment/experiment/ab/`), its own pause
+marker (`ab.pause`) and its own unseal/report pass, so none of its records can be
+confused with `pilot`, `formal` or `formal2`.
+
+```bash
+# 1. Implementation checks. Makes no model call and states no result.
+dream-rsi mof-acceptance --phase ab
+
+# 2. Both paired blocks, under the vault.
+dream-rsi mof-run --phase ab
+
+# 3. Open the sealed pool once, for the frozen candidates of this phase only.
+dream-rsi mof-unseal --phase ab
+
+# 4. Figures, tables, summary.md.
+dream-rsi mof-report --phase ab
+```
+
+**Before step 1, copy the existing acceptance record aside.** `mof-acceptance`
+writes `.runtime/mof_experiment/acceptance.json`, which is a single shared file
+and currently holds the `formal2` run at 2026-10-14T10:02:35. Running it for `ab`
+overwrites that record; the digest it held is also recorded in `formal2`'s block
+records and phase index, but the check list is not.
+
+`ab` stops at a block boundary if `.runtime/mof_experiment/experiment/ab/ab.pause`
+exists. Two blocks, so it is a short phase -- but the marker is the only way to
+stop between them without killing a process that holds a sealed vault.
+
+Its report is **descriptive by design** (§10.3): it gives the two paired
+differences, their mean, an exploratory interval and the cost, and applies no
+pre-registered verdict. A `descriptive_only` reading is not a failed test.

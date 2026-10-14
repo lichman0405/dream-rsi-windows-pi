@@ -6,7 +6,7 @@ Five figures, following the v2 result figures' logic rather than their task:
    cumulative Pi tokens, one trajectory per paired run, with the outer worlds
    marked. Test-pool numbers never enter a trajectory.
 2. **Recursive dynamics** -- one panel per split seed: sealed-pool ``S`` and
-   ``Q`` at each budget checkpoint, all three arms on the same checkpoints.
+   ``Q`` at each budget checkpoint, every registered arm on the same checkpoints.
 3. **Paired final comparison** -- per-split A/B/C final test ``S`` with paired
    A-B lines, the cluster-bootstrap interval, and the pre-registered 0.05 bar.
 4. **Recommendation quality** -- the CO2 uptake distribution of each arm's top
@@ -187,6 +187,9 @@ def paired_final_comparison(
     plt = _matplotlib()
     rows = list(table["rows"])
     seeds = sorted({int(row["split_seed"]) for row in rows})
+    # Legend entries for the arms this phase actually ran, in a fixed order, so a
+    # two-arm phase does not advertise a third arm that never produced a point.
+    present = [m for m in ("A", "B", "C") if any(f"{m}_test_S" in row for row in rows)]
     fig, (left, right) = plt.subplots(1, 2, figsize=(9.2, 4.2),
                                       gridspec_kw={"width_ratios": [2.1, 1.0]})
     positions = {seed: index for index, seed in enumerate(seeds)}
@@ -207,7 +210,7 @@ def paired_final_comparison(
     left.set_ylim(0.0, 1.0)
     left.grid(alpha=0.25, linewidth=0.6)
     handles = [plt.Line2D([], [], marker="o", linestyle="", color=ARM_STYLE[m]["color"],
-                          label=ARM_STYLE[m]["label"]) for m in ("A", "B", "C")]
+                          label=ARM_STYLE[m]["label"]) for m in present]
     left.legend(handles=handles, fontsize=7.5, frameon=False, loc="lower right")
     left.set_title("Final screening score by split", fontsize=10)
 

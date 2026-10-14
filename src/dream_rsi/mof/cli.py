@@ -33,7 +33,7 @@ from .figures import (
     recommendation_explanation,
     recursive_dynamics,
 )
-from .protocol import K, MODEL, THINKING, Protocol, block_plans
+from .protocol import K, MODEL, PHASES, THINKING, Protocol, block_plans
 from .scoring import MofPool, MofScreeningEvaluator, material_references
 from .vault import FileVault
 
@@ -390,13 +390,19 @@ def cmd_mof_report(args: Any) -> int:
     references = (json.loads((target / "references.json").read_text(encoding="utf-8"))
                   if (target / "references.json").is_file() else {})
 
+    # What this phase registered, not what the design's largest phase happens to
+    # run. A block is only "incomplete" against its own arm set.
+    spec = PHASES[args.phase]
+    expected_arms = tuple(sorted(spec.methods))
+
     figures: dict[str, Any] = {}
     if blocks:
         figures["quality_budget_staircase"] = quality_budget_staircase(blocks, fig_dir)
         figures["internal_mechanism"] = internal_mechanism(blocks, fig_dir)
     table: dict[str, Any] = {}
     if unsealed:
-        table = paired_table(unsealed)
+        table = paired_table(unsealed, expected_arms=expected_arms,
+                             reading_mode=spec.reading_mode)
         checkpoints = _checkpoint_series(blocks, unsealed)
         figures["recursive_dynamics"] = recursive_dynamics(checkpoints, fig_dir)
         figures["paired_final_comparison"] = paired_final_comparison(table, fig_dir)
@@ -407,15 +413,17 @@ def cmd_mof_report(args: Any) -> int:
     report = {
         "phase": args.phase,
         "protocol_digest": blocks[0]["protocol_digest"] if blocks else None,
+        "registered_arms": list(expected_arms),
+        "reading_mode": spec.reading_mode,
         # A block and an arm-run are not the same thing and must not share a
-        # number: one paired block runs all three arms. Reporting twelve
+        # number: one paired block runs all of the phase's arms. Reporting twelve
         # "blocks" for a four-block pilot overstates the design by 3x, and a
         # reviewer reading the analysis would be comparing against the wrong
         # denominator.
         "blocks": len(_by_block(blocks)),
         "complete_blocks": sum(
             1 for arms in _by_block(blocks).values()
-            if {"A", "B", "C"} <= {arm["plan"]["method"] for arm in arms}
+            if set(expected_arms) <= {arm["plan"]["method"] for arm in arms}
             and all(arm.get("status") == "COMMITTED" for arm in arms)
         ),
         "arm_runs": len(blocks),
@@ -554,14 +562,28 @@ def _write_summary(
     if report["paired"]:
         verdict = report["paired"]["A_minus_B_verdict"]
         ab = report["paired"]["A_minus_B"]
+        registered = list(report.get("registered_arms") or [])
+        descriptive = report.get("reading_mode") == "descriptive"
         lines.append("## Main result\n")
         lines.append(f"- Paired blocks: {report['paired']['complete_blocks']} complete of "
                      f"{report['paired']['blocks']}")
         lines.append(f"- **A − B** on sealed-pool S: mean {ab['mean']:+.4f}, "
                      f"exploratory 95% [{ab['ci95'][0]:+.4f}, {ab['ci95'][1]:+.4f}], "
                      f"{ab['consistent_direction']}/{len(ab['splits'])} splits favouring A")
-        lines.append(f"- Pre-registered reading: **{verdict['verdict']}** "
-                     f"({verdict['rules']})")
+        if descriptive:
+            lines.append(f"- Reading: **{verdict['verdict']}** "
+                         f"({verdict.get('reason', verdict['rules'])})")
+            lines.append(f"- Arms registered for this phase: {', '.join(registered)}. "
+                         "An arm that is not listed was never part of this phase; its "
+                         "absence is a design choice and not a failure, a truncated run "
+                         "or a missing result.")
+            lines.append(f"- Replication is very small: {len(ab['splits'])} paired block(s), "
+                         "one search each, sharing one sealed pool. These are two paired "
+                         "differences and their mean, not a test, and they cannot support "
+                         "a claim about MOFs in general.")
+        else:
+            lines.append(f"- Pre-registered reading: **{verdict['verdict']}** "
+                         f"({verdict['rules']})")
         lines.append("")
         if report.get("gap"):
             lines.append("## Development against sealed pool\n")
@@ -583,9 +605,22 @@ def _write_summary(
                      f"source data `{paths['csv']}`")
     lines.append("")
     lines.append("## Limits\n")
+    splits_run = len(report["paired"]["A_minus_B"].get("splits", [])) if report["paired"] else 0
     lines.append("- The development pool is a finite sample of the same material library the "
-                 "sealed pool comes from, and the five splits share that pool. Intervals are "
-                 "exploratory and are not a claim about MOFs in general.")
+                 f"sealed pool comes from, and the {splits_run or 'registered'} split(s) share "
+                 "that pool. Intervals are exploratory and are not a claim about MOFs in "
+                 "general.")
+    if report.get("reading_mode") == "descriptive":
+        lines.append(f"- This phase was registered as a small two-arm comparison "
+                     f"({', '.join(report.get('registered_arms') or [])}) with "
+                     f"{report['paired']['blocks']} paired block(s). It runs the design's "
+                     "primary comparison and nothing else: it carries no auxiliary "
+                     "search-order arm, so it says nothing about serial search at W = 1, "
+                     "and the design's five-split reading rule is not applied to it.")
+        lines.append("- The sealed pool had already been opened for the pilot on splits 101 "
+                     "and 211, and both splits used here are among them. Its labels are "
+                     "known to the experimenter. This is an exploratory reading on an "
+                     "already-opened pool, not a blind confirmatory test.")
     lines.append("- The provider reports no per-request money cost, so the report gives tokens "
                  "and leaves the currency figure unknown rather than estimating one.")
     lines.append("- Extended reasoning was fixed `off` for every call in every arm; the probe "

@@ -663,7 +663,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--only-split-seed", type=int, default=None)
     p.add_argument("--only-repeat", type=int, default=None)
     p.add_argument("--block-limit", type=int, default=None,
-                   help="cap the number of paired blocks (each still runs all three arms)")
+                   help="cap the number of paired blocks (each still runs every arm "
+                        "the phase registers)")
     p.add_argument("--no-isolation", action="store_true",
                    help="skip the search-phase vault; only for an offline rehearsal")
     p.set_defaults(func=_mof("cmd_mof_run"))
