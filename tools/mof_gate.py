@@ -16,6 +16,10 @@ Conditions, all read from the records rather than from the console:
 * each arm finished the full eight outer worlds, all sealed and scoreable;
 * no policy-development revision was cut off by the context ceiling;
 * no call was refused by the token ceiling, and no request failed;
+* every registered arm has a readable cost ledger recording no refusal, no
+  failed call and no call settled without a usage report;
+* no arm left a reserved call unsettled -- asserted only once that arm has
+  completed, since a reservation in flight while a runner is alive is normal;
 * every arm stayed inside its own ceiling and the phase inside its total;
 * the vault reported itself sealed and verified absent.
 
@@ -24,6 +28,15 @@ check, written for the three-arm ``formal2`` phase, hard-coded ``A``/``B``/``C``
 and would have failed a two-arm phase for the arm it deliberately does not
 register -- reporting a design choice as a defect. Everything else is unchanged.
 
+The ledger sweep reads every registered arm's ``cost-ledger.jsonl`` instead of
+arm ``A``'s alone; the aggregate check above reads the block record, so a failed
+request in any other arm was invisible here. Arm ``A`` keeps the revision-level
+checks it alone can have, because ``B`` runs no policy developer.
+
+Not settled here: a call can settle with ``charged: 0`` and an all-zero token
+record while still having produced output, so the billed spend is unknown rather
+than zero. This gate does not read such a row as a free call; neither does it
+fail on the row itself, since ``PI_OUTPUT_LIMIT`` already fails as a failed call.
 The test pool is not opened here and no score is computed.
 """
 from __future__ import annotations
@@ -34,9 +47,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
+# The auditor sits next to this script. Running the gate from another working
+# directory must not change which module is imported.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dream_rsi.mof.protocol import PHASES          # noqa: E402
 from dream_rsi.storage.sqlite_registry import Registry  # noqa: E402
+from mof_ledger_audit import audit_ledger          # noqa: E402
 
 PHASE = sys.argv[1] if len(sys.argv) > 1 else "formal2"
 
@@ -65,13 +82,20 @@ if index.is_file():
 
 check(set(records) == set(ARMS),
       f"{len(records)} of {len(ARMS)} registered arms present for {BLOCK}: {sorted(records)}")
+committed = {method: False for method in ARMS}
 for method in ARMS:
     row = records.get(method)
     if row is None:
         continue
     check(row["status"] == "COMMITTED", f"{method} status {row['status']}")
+    committed[method] = row["status"] == "COMMITTED"
 
 # Every arm must have run its full length: the phase's worlds, sealed, scoreable.
+# ``arm_complete`` keeps those facts as a value, so the reservation check further
+# down can ask whether the arm has stopped. A reservation that outlives its arm
+# is a hole in the ceiling accounting; one still open while the arm runs is just
+# the newest call.
+arm_complete: dict[str, bool] = {method: False for method in ARMS}
 registry = Registry(".runtime/registry.sqlite3")
 try:
     # block_id is "<phase>-s<seed>-r<repeat>"; the run id is "mof-<phase>-s<seed>-r<rep>-<arm>"
@@ -84,6 +108,10 @@ try:
               f"{method} has {len(worlds)} of {spec.worlds} outer worlds")
         check(len(sealed) == len(worlds),
               f"{method}: {len(sealed)} of {len(worlds)} worlds are scoreable")
+        arm_complete[method] = (committed[method]
+                                and len(worlds) == spec.worlds
+                                and len(sealed) == len(worlds))
+    # A-specific, and it stays that way: only A registers a policy developer.
     if "A" in run_ids:
         revisions = registry.list_revisions(run_ids["A"])
         context_cut = [r for r in revisions if r.status == "CONTEXT_LIMIT"]
@@ -112,20 +140,34 @@ for method, row in sorted(records.items()):
 check(total_charged <= spec.total_token_cap,
       f"phase committed {total_charged:,} of {spec.total_token_cap:,}")
 
-# the A arm's ledger, checked line by line rather than only in aggregate
-ledger_path = Path(".runtime/runs") / run_ids["A"] / "cost-ledger.jsonl"
-refused = failed_calls = 0
-if ledger_path.is_file():
-    for line in ledger_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        if row.get("event") == "refused":
-            refused += 1
-        if row.get("event") == "request" and not row.get("ok"):
-            failed_calls += 1
-check(refused == 0, f"A's ledger records no refusal ({refused})")
-check(failed_calls == 0, f"A's ledger records no failed call ({failed_calls})")
+# The persistent ledgers, read arm by arm rather than in aggregate and rather
+# than for A alone. ``total_charged`` above is the block record's summary of the
+# same calls; this opens the files the runner actually wrote.
+for method in ARMS:
+    ledger_path = Path(".runtime/runs") / run_ids[method] / "cost-ledger.jsonl"
+    if not ledger_path.is_file():
+        check(False, f"{method} has no cost ledger at {ledger_path}")
+        continue
+    audit = audit_ledger(ledger_path)
+    check(audit.refused == 0, f"{method} ledger refusals {audit.refused}")
+    check(audit.failed == 0, f"{method} ledger failed calls {audit.failed}")
+    check(audit.unreported == 0,
+          f"{method} ledger calls settled without a usage report {audit.unreported}")
+    check(audit.unreadable == 0, f"{method} ledger unreadable rows {audit.unreadable}")
+
+    if audit.outstanding and arm_complete[method]:
+        check(False, f"{method} left {audit.outstanding} reservation(s) unsettled after "
+                     f"completing: {', '.join(audit.outstanding_call_ids[:3])}")
+    elif audit.outstanding:
+        notes.append(f"{method} has {audit.outstanding} reservation(s) in flight "
+                     f"(arm not complete; not a gate condition)")
+
+    # Diagnostic only. A cut-off call leaves this shape in the ledger, and the
+    # spend it actually incurred is unknown rather than zero. Not a gate
+    # condition: a failed call already fails above.
+    if audit.zero_charge:
+        notes.append(f"{method} ledger has {audit.zero_charge} call(s) charged nothing "
+                     f"against a live reservation (billed spend unknown)")
 
 # ------------------------------------------------------------------ isolation
 manifest = OUT / "vault-manifest.jsonl"
