@@ -137,8 +137,8 @@ unknown usage and that recorded-token checkpoint positions were not rewritten.
 All other completion checks remain required. Complete each arm under its vault,
 verify restoration and its ledger before starting the next arm, then gate both
 paired blocks before final freezing, test-pool scoring and reporting. Preserve
-the completed initial B without rerunning it. The ignored continuation script
-is `.runtime/mof_experiment/codex-cc-control/continue-ab.py`.
+the completed initial B without rerunning it. The continuation controller is
+`tools/mof_ab_continue.py`; its logs, lock and status are runtime artifacts.
 
 The implementation's replay horizon is `K2 = 6` in
 `src/dream_rsi/mof/experiment.py`, including the completed initial B and the
