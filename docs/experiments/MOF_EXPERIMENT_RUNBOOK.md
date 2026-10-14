@@ -113,3 +113,36 @@ stop between them without killing a process that holds a sealed vault.
 Its report is **descriptive by design** (§10.3): it gives the two paired
 differences, their mean, an exploratory interval and the cost, and applies no
 pre-registered verdict. A `descriptive_only` reading is not a failed test.
+
+### Single approved failure (2026-10-14)
+
+The user authorized continuing `ab` with exactly one preserved discovery
+failure in `mof-ab-s101-r1-B`: request 60, call id
+`229d0d5d413b4ec988dfcaf79b1d029c`, `PI_OUTPUT_LIMIT`. The request produced output
+before it was aborted. Its ledger records zero tokens; its billed usage is
+unknown. The original ledger and failed node remain unchanged.
+
+`tools/mof_gate.py` matches the request's identity fingerprint
+`330566cf47932d61160173329075d5ebe50ea250b0710432466545df56f17dc9` and the exact
+phase, block and arm. It reports the failure and its approval separately;
+different requests, altered identity fields, duplicates and other phases are
+not covered. Removing the known failure also fails its gate.
+
+For budget checks, its original 23,312-token reservation is carried separately
+from recorded tokens. This is a conservative allowance, not measured or billed
+usage. The gate adds it once to the arm and phase budget checks, using the
+latest record per unique run across both blocks. Reports must disclose the
+unknown usage and that recorded-token checkpoint positions were not rewritten.
+
+All other completion checks remain required. Complete each arm under its vault,
+verify restoration and its ledger before starting the next arm, then gate both
+paired blocks before final freezing, test-pool scoring and reporting. Preserve
+the completed initial B without rerunning it. The ignored continuation script
+is `.runtime/mof_experiment/codex-cc-control/continue-ab.py`.
+
+The implementation's replay horizon is `K2 = 6` in
+`src/dream_rsi/mof/experiment.py`, including the completed initial B and the
+historical phases. The design's tables stated 12 for formal/ab (8 for pilot);
+those planned values were not implemented. Continuing uses the existing value
+6 for every arm. This discrepancy must be stated in the final report; it is
+not evidence that the original parameter table was satisfied.
