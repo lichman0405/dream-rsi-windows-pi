@@ -645,3 +645,95 @@ def test_a_pause_marker_stops_the_phase_at_a_block_boundary(
     summary = runner.run_phase([plans[-1]], protect=[])
     assert summary["blocks"] == [], "the marker must stop the next block too"
     assert any("paused before" in note for note in summary["notes"])
+
+
+# --------------------------------------------------------------- formal v2 identity
+
+
+def test_formal2_is_a_separate_identity_from_formal() -> None:
+    """One v2 label for run ids, output dir, marker, digests and reports.
+
+    Reusing "formal" would have put v2's runs into v1's registry namespace and
+    its records into v1's output directory, where a reader could not tell which
+    implementation produced which number.
+    """
+    from dream_rsi.mof.protocol import PHASES, block_plans
+
+    v1, v2 = PHASES["formal"], PHASES["formal2"]
+    assert v2.worlds == v1.worlds and v2.token_budget == v1.token_budget
+    assert v2.split_seeds == v1.split_seeds and v2.repeats == v1.repeats
+    assert v2.checkpoints == v1.checkpoints
+    assert {k: (m.W, m.K1, m.M) for k, m in v2.methods.items()} == {
+        k: (m.W, m.K1, m.M) for k, m in v1.methods.items()
+    }, "v2 must keep v1's parameters; only the implementation changed"
+
+    ids_v1 = {plan.run_id for plan in block_plans("formal")}
+    ids_v2 = {plan.run_id for plan in block_plans("formal2")}
+    assert ids_v1.isdisjoint(ids_v2)
+    assert all(run_id.startswith("mof-formal2-") for run_id in ids_v2)
+
+
+def test_the_two_formal_phases_have_distinct_digests() -> None:
+    from dream_rsi.mof.cli import _prepared
+    from dream_rsi.mof.protocol import Protocol
+
+    # The digest covers the prepared_root string, so it is only reproducible
+    # when it is built the way the command line builds it.
+    prepared = str(_prepared(Path.cwd()))
+    v1 = Protocol(phase="formal", prepared_root=prepared)
+    v2 = Protocol(phase="formal2", prepared_root=prepared)
+    assert v1.digest != v2.digest
+    # The historical digests still reproduce from this code, so the records of
+    # the phases that already ran stay checkable.
+    assert v1.digest == (
+        "10d9a668af73d64281bc3301b90cac7e8b44cb18bee7346fe9769ece9cb2c603"
+    )
+    assert Protocol(phase="pilot", prepared_root=prepared).digest == (
+        "9f5940ed36ffbedf3b4ce3a6f43a4d65ee07435df1a4727f15e6c9620430b0f8"
+    )
+
+
+def test_the_pause_marker_is_checked_at_every_block_boundary(
+    tmp_path: Path, split_101: Path,
+) -> None:
+    """Not just before the first block: a phase must stop at any boundary."""
+    from dream_rsi.mof.experiment import MofExperimentRunner
+    from dream_rsi.mof.protocol import MethodSpec, PhaseSpec, Protocol, block_plans
+
+    spec = PhaseSpec(
+        key="acceptance", worlds=1, token_budget=200_000, session_cap=32,
+        split_seeds=(101,), repeats=(1, 2, 3), checkpoints=(1_000,),
+        methods={
+            method: MethodSpec(key=method, name=method,
+                               incumbent_policy="policies/incumbent.py",
+                               uses_developer=False, W=2, K1=1, M=1)
+            for method in ("A", "B", "C")
+        },
+    )
+    protocol = Protocol(phase="pilot", prepared_root=str(PREPARED), spec_override=spec)
+    runner = MofExperimentRunner(
+        project_root=Path.cwd(), protocol=protocol, task_dir=Path("tasks/mof_screening"),
+        runner_script=RUNNER, out_root=tmp_path,
+        backend_factory=lambda config, plan, budget: _ScriptedMofBackend(budget),
+        run_namespace="boundary-", runtime_root=tmp_path / "runtime",
+    )
+    labels = _pool_from(split_101, "boundary-101").load_labels()
+    digest = _pool_from(split_101, "boundary-101").data_digest()
+    plans = block_plans("pilot")
+    block_ids = sorted({plan.block_id for plan in plans})
+
+    # Run block 1, then raise the marker: the phase must stop before block 2.
+    first = [p for p in plans if p.block_id == block_ids[0]]
+    rest = [p for p in plans if p.block_id != block_ids[0]]
+    for plan in first:
+        assert runner.run_block(plan, labels=labels, pool_digest=digest).status == "COMMITTED"
+
+    runner.pause_marker.write_text("stop", encoding="utf-8")
+    summary = runner.run_phase(rest, protect=[])
+    assert summary["blocks"] == [], "the marker must stop the phase at this boundary"
+    assert any("paused before" in note for note in summary["notes"]), summary["notes"]
+
+    # Clearing it lets the same call proceed, so the marker is the only cause.
+    runner.pause_marker.unlink()
+    summary = runner.run_phase(rest, protect=[])
+    assert len(summary["blocks"]) == len(rest)

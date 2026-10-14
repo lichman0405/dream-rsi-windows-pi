@@ -208,3 +208,66 @@ def test_the_aborted_formal_feedback_fits_after_re_encoding() -> None:
     # And it must stay comfortably inside, not merely under: the real prompt also
     # carries the contract, the incumbent source and the output reservation.
     assert estimated < 0.5 * WINDOW_TOKENS
+
+
+@pytest.mark.skipif(not FORMAL_TRACES.is_dir(),
+                    reason="no stored run traces to measure against")
+def test_full_formal_shape_context_capacity() -> None:
+    """Eight worlds and the whole revision count, in the units that failed.
+
+    The aborted run died at five worlds with ten policy evaluations behind it.
+    The formal protocol runs eight worlds and evaluates the incumbent plus two
+    revisions at the final selection, so the honest worst case is larger than
+    anything that was ever actually sent -- and it has to fit with room for the
+    contract, the incumbent source and the output reservation on top.
+    """
+    import collections
+
+    from dream_rsi.storage.sqlite_registry import Registry
+
+    registry = Registry(".runtime/registry.sqlite3")
+    try:
+        base = [e for e in registry.list_replays()
+                if e.world_id.startswith("mof-formal-s101-r1-B")]
+    finally:
+        registry.close()
+    if not base:
+        pytest.skip("no eight-world formal traces on this machine")
+
+    class ReEncoded:
+        def __init__(self, episode, policy):  # noqa: ANN001
+            self.decision_trace = encode_decisions(
+                [json.loads(raw) for raw in episode.decision_trace])
+            self.trajectory_format = CURRENT_FORMAT
+            self.rho = episode.rho
+            self.world_id = episode.world_id
+            self.policy_version_id = policy
+
+    # M = 3: the final selection replays the incumbent and up to two revisions.
+    episodes = [ReEncoded(e, f"policy-{index}") for index in range(3) for e in base]
+    by_policy: dict[str, list] = collections.OrderedDict()
+    for episode in episodes:
+        by_policy.setdefault(episode.policy_version_id, []).append(episode)
+
+    emitted: set[str] = set()
+    total = 0
+    for group in by_policy.values():
+        by_world: dict[str, list] = collections.OrderedDict()
+        for episode in group:
+            by_world.setdefault(episode.world_id, []).append(episode)
+        for world_id, world_episodes in by_world.items():
+            ordered = sorted(world_episodes, key=lambda e: e.rho)
+            if world_id not in emitted:
+                total += sum(len(line) for line in render_node_table(ordered))
+                emitted.add(world_id)
+            for episode in ordered:
+                total += 90 + sum(len(line) for line in render_episode_steps(episode))
+
+    assert len(emitted) == 8, "the fixture must carry the full eight worlds"
+    estimated = total / BYTES_PER_TOKEN
+    # The prompt also carries the contract and the incumbent source, and the
+    # reply is reserved on top; a third of the window leaves ample room.
+    assert estimated < WINDOW_TOKENS / 3, (
+        f"the full formal shape needs ~{estimated:,.0f} tokens of the "
+        f"{WINDOW_TOKENS:,} window, leaving too little for the rest of the request"
+    )

@@ -190,7 +190,25 @@ PHASES: Mapping[str, PhaseSpec] = {
         checkpoints=(1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000, 30_000_000),
         methods=_methods(w=8, k1=12, a_M=3, c_k1=96),
     ),
+    # The formal phase as re-run under the fixed feedback encoding. Same arms,
+    # seeds, blocks, checkpoints and ceilings as "formal" -- the parameters did
+    # not change -- but its own key, so that run ids, the output directory, the
+    # cost ledgers, the pause marker, the unseal pass and the report all carry
+    # the v2 identity and cannot be confused with, or merge into, the v1 records
+    # this phase replaces. v1 is kept whole and reported separately.
+    "formal2": PhaseSpec(
+        key="formal2", worlds=8,
+        token_budget=30_000_000, session_cap=768,
+        split_seeds=SPLIT_SEEDS, repeats=(1, 2),
+        checkpoints=(1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000, 30_000_000),
+        methods=_methods(w=8, k1=12, a_M=3, c_k1=96),
+    ),
 }
+
+#: Phases whose numbers are the experiment's result. ``pilot`` and ``formal``
+#: are what was actually run and are never overwritten; ``formal2`` is the
+#: continuation under the fixed feedback encoding.
+PHASE_NAMES: tuple[str, ...] = tuple(PHASES)
 
 #: Replay sweep and penalty, identical in both phases and every arm.
 RHO_GRID: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
@@ -351,7 +369,8 @@ __all__ = [
     "DEVELOPMENT_RESERVE_FRACTION", "EVALUATOR_MEMORY_MB", "EVALUATOR_TIMEOUT_S",
     "K", "LAMBDA_WEIGHT", "LIVE_RHO", "MODEL", "MethodSpec", "PHASES",
     "POLICY_MEMORY_MB", "POLICY_SELECT_TIMEOUT_S", "PRACTICAL_THRESHOLD",
-    "CONTEXT_LIMIT_TOKENS", "IMPLEMENTATION_REVISION", "PhaseSpec", "Protocol", "RHO_GRID",
+    "CONTEXT_LIMIT_TOKENS", "IMPLEMENTATION_REVISION", "PHASE_NAMES", "PhaseSpec",
+    "Protocol", "RHO_GRID",
     "ROW_ORDER_PERMUTATIONS", "SPLIT_SEEDS",
     "THINKING",
     "block_plans", "development_reserve", "method_order",

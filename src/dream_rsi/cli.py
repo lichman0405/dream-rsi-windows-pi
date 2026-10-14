@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters.base import DiscoveryBackend, TaskSpec
+from .mof.protocol import PHASE_NAMES
 from .config import (
     BACKEND_IDENTITY_ENV,
     KNOWN_TASKS,
@@ -654,11 +655,11 @@ def build_parser() -> argparse.ArgumentParser:
         "mof-acceptance",
         help="check the MOF screening implementation; makes no model call",
     )
-    p.add_argument("--phase", default="pilot", choices=("pilot", "formal"))
+    p.add_argument("--phase", default="pilot", choices=PHASE_NAMES)
     p.set_defaults(func=_mof("cmd_mof_acceptance"))
 
     p = sub.add_parser("mof-run", help="run one phase of the MOF screening experiment")
-    p.add_argument("--phase", default="pilot", choices=("pilot", "formal"))
+    p.add_argument("--phase", default="pilot", choices=PHASE_NAMES)
     p.add_argument("--only-split-seed", type=int, default=None)
     p.add_argument("--only-repeat", type=int, default=None)
     p.add_argument("--block-limit", type=int, default=None,
@@ -668,7 +669,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_mof("cmd_mof_run"))
 
     p = sub.add_parser("mof-unseal", help="open the sealed test pool for frozen candidates")
-    p.add_argument("--phase", default="pilot", choices=("pilot", "formal"))
+    p.add_argument("--phase", default="pilot", choices=PHASE_NAMES)
     p.add_argument("--references-only", action="store_true",
                    help="recompute the fixed screening references only; re-grades no candidate")
     p.add_argument("--no-isolation", action="store_true",
@@ -676,7 +677,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_mof("cmd_mof_unseal"))
 
     p = sub.add_parser("mof-report", help="figures, tables and summary.md for a phase")
-    p.add_argument("--phase", default="pilot", choices=("pilot", "formal"))
+    p.add_argument("--phase", default="pilot", choices=PHASE_NAMES)
     p.set_defaults(func=_mof("cmd_mof_report"))
 
     p = sub.add_parser("report", help="read a finished run back out")
