@@ -35,6 +35,7 @@ from pathlib import Path
 
 from ..adapters._pi_session import PiSessionResult, run_pi_prompt
 from .policy_development import Proposal, StaticCheck, validate_policy_source
+from .token_budget import ROLE_POLICY_DEVELOPMENT, TokenBudget
 
 #: Delimiters the model is told to use. Plain sentinels rather than a Markdown
 #: fence because a model that also writes prose about its change will happily
@@ -249,6 +250,10 @@ class LlmPolicyDeveloper:
         timeout_s: float = 900.0,
         python_executable: str | None = None,
         memory_limit_mb: int | None = 4096,
+        token_budget: TokenBudget | None = None,
+        max_output_bytes: int = 32768,
+        thinking: str | None = None,
+        context_limit_tokens: int | None = None,
     ) -> None:
         if not provider or not model:
             raise ValueError(
@@ -262,6 +267,10 @@ class LlmPolicyDeveloper:
         self.timeout_s = float(timeout_s)
         self.python_executable = python_executable
         self.memory_limit_mb = memory_limit_mb
+        self.token_budget = token_budget
+        self.max_output_bytes = int(max_output_bytes)
+        self.thinking = thinking
+        self.context_limit_tokens = context_limit_tokens
         #: One entry per call, kept so a run can report what it actually spent.
         self.sessions: list[dict[str, object]] = []
 
@@ -287,17 +296,25 @@ class LlmPolicyDeveloper:
                 "provider": self.provider,
                 "model": self.model,
                 "prompt": prompt,
+                "no_tools": True,
+                "thinking": self.thinking,
             },
             run_dir=session_dir,
             timeout_s=self.timeout_s,
             python_executable=self.python_executable,
             memory_limit_mb=self.memory_limit_mb,
+            token_budget=self.token_budget,
+            role=ROLE_POLICY_DEVELOPMENT,
+            max_output_bytes=self.max_output_bytes,
+            context_limit_tokens=self.context_limit_tokens,
         )
         self.sessions.append({
             "iteration_t": iteration_t, "m": m, "attempt": attempt,
             "ok": result.ok, "error_type": result.error_type,
             "session_id": result.session_id, "duration_s": round(result.duration_s, 3),
             "event_types": list(result.event_types[-12:]),
+            "token_usage": result.token_usage,
+            "token_charged": result.token_charged,
         })
         return result
 

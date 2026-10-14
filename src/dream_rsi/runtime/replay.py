@@ -28,6 +28,7 @@ from ..domain.errors import IntegrityError
 from ..domain.models import Node, ReplayEpisode, StopReason, new_id
 from ..policy.protocol import PrefixObservation
 from ..policy.validation import validate_batch
+from .trajectory import CURRENT_FORMAT, encode_decisions, is_supported_format, iter_batches
 
 PolicyFn = Callable[[PrefixObservation, float], Sequence[str]]
 
@@ -97,7 +98,7 @@ def replay_world(
     no_progress = 0
     stop_reason = StopReason.MAX_ROUNDS  # the paper's K2 exhaustion
     select_calls = 0
-    decisions: list[str] = []
+    rich_steps: list[dict[str, object]] = []
 
     while rounds < max_rounds:
         if len(revealed) == total:
@@ -113,8 +114,11 @@ def replay_world(
             max_parallelism=max_parallelism,
         )
         if not batch:
-            decisions.append(json.dumps({"observation": observation.to_dict(),
-                                         "batch": [], "revealed": []}, sort_keys=True))
+            # The stopping decision is a step like any other and keeps its full
+            # observation: a policy being asked to learn when to stop needs to
+            # see what it stopped on.
+            rich_steps.append({"observation": observation.to_dict(),
+                               "batch": [], "revealed": []})
             stop_reason = StopReason.STOP_EMPTY_BATCH
             break
         # Simultaneous batch: every child is resolved against the SAME pre-round
@@ -123,16 +127,20 @@ def replay_world(
         action_trace.append(batch)
         rounds += 1  # per §3 every NONEMPTY batch counts, including no-progress
         fresh = [c for c in children if c is not None]
-        decisions.append(json.dumps({"observation": observation.to_dict(),
-                                     "batch": list(batch),
-                                     "revealed": [world.observation({c}, rounds, max_parallelism).nodes[0].to_dict()
-                                                  for c in fresh]}, sort_keys=True))
+        rich_steps.append({"observation": observation.to_dict(),
+                           "batch": list(batch),
+                           "revealed": [world.observation({c}, rounds, max_parallelism).nodes[0].to_dict()
+                                        for c in fresh]})
         if not fresh:
             no_progress += 1
         revealed.update(fresh)
     else:
         if len(revealed) == total:
             stop_reason = StopReason.FULLY_REVEALED
+
+    # Node records are written once and the steps refer to them by id; see
+    # runtime/trajectory.py for why, and decode_decisions for the exact inverse.
+    decisions = list(encode_decisions(rich_steps))
 
     revealed_order = tuple(nid for nid in world.node_ids() if nid in revealed)
     non_root = revealed_order[1:]
@@ -154,7 +162,7 @@ def replay_world(
         "revealed_order": list(revealed_order),
         "selected_batches": [list(b) for b in action_trace],
         "world_digest": world.world_digest(),
-        "trajectory_format": 2,
+        "trajectory_format": CURRENT_FORMAT,
         "decision_trace": decisions,
     }
     return ReplayEpisode(
@@ -173,7 +181,7 @@ def replay_world(
         no_progress_count=no_progress,
         discovery_agent_calls=0,
         evaluator_calls=0,
-        trajectory_format=2,
+        trajectory_format=CURRENT_FORMAT,
         decision_trace=tuple(decisions),
     )
 
@@ -204,9 +212,9 @@ def replay_all_rhos(
 def validate_episode_trace(world: SealedWorldLike, episode: ReplayEpisode,
                            max_parallelism: int, max_rounds: int) -> None:
     """Reconstruct every decision from recorded actions, without running policy/agent."""
-    if episode.trajectory_format != 2:
+    if not is_supported_format(episode.trajectory_format):
         raise IntegrityError("legacy replay has no complete decision trace")
-    batches = iter(json.loads(step)["batch"] for step in episode.decision_trace)
+    batches = iter(iter_batches(episode))
 
     def recorded_action(_observation: PrefixObservation, _rho: float) -> Sequence[str]:
         try:

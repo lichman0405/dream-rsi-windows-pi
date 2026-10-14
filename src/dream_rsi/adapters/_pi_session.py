@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..runtime.winjob import WindowsJob, terminate_tree
+from ..runtime.token_budget import ROLE_DISCOVERY, TokenBudget, estimate_tokens
 
 #: The minimum environment a child needs to start and find its tools. Anything
 #: not listed here is dropped rather than inherited.
@@ -73,6 +74,9 @@ class PiSessionResult:
     duration_s: float = 0.0
     timed_out: bool = False
     stderr_tail: str = ""
+    token_usage: dict[str, int] = field(default_factory=dict)
+    token_charged: int | None = None
+    token_seq: int | None = None
     payload: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -87,6 +91,10 @@ def run_pi_prompt(
     timeout_s: float,
     python_executable: str | None = None,
     memory_limit_mb: int | None = 4096,
+    token_budget: TokenBudget | None = None,
+    role: str = ROLE_DISCOVERY,
+    max_output_bytes: int = 16384,
+    context_limit_tokens: int | None = None,
 ) -> PiSessionResult:
     """Run one prompt through Pi and return its final assistant text.
 
@@ -103,6 +111,39 @@ def run_pi_prompt(
     # the parent sees only "no result file" and loses the real reason.
     run_dir = Path(run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    system_prompt = str(request.get("system_prompt") or "")
+    if context_limit_tokens is not None:
+        # A request larger than the window is rejected by the provider, which
+        # arrives as a bare agent error and takes the whole run down with it.
+        # Refusing it here makes it a recorded, explicable outcome instead.
+        needed = estimate_tokens(str(request.get("prompt") or ""), system_prompt,
+                                 max_output_bytes)
+        if needed > context_limit_tokens:
+            return PiSessionResult(
+                ok=False, error_type="CONTEXT_LIMIT_EXCEEDED",
+                error=(f"this request needs about {needed} tokens and the model's window "
+                       f"is {context_limit_tokens}; it was not sent"),
+            )
+    grant = None
+    if token_budget is not None:
+        if not request.get("no_tools"):
+            raise ValueError("a hard aggregate token budget requires Pi no-tools mode")
+        grant = token_budget.reserve(
+            role=role,
+            prompt=str(request.get("prompt") or ""),
+            system_prompt=system_prompt,
+            max_output_bytes=max_output_bytes,
+        )
+        if grant is None:
+            # Refused before the call started: nothing was sent, so nothing is
+            # charged. The ledger already holds the refusal row.
+            return PiSessionResult(
+                ok=False, error_type="TOKEN_BUDGET_EXHAUSTED",
+                error=("the conservative reservation for this call would exceed the "
+                       f"method's remaining {role} budget; the call was not sent"),
+            )
+        request["max_output_bytes"] = max_output_bytes
 
     request_path = run_dir / "pi_request.json"
     request_path.write_text(json.dumps(request, indent=2), encoding="utf-8")
@@ -155,6 +196,18 @@ def run_pi_prompt(
 
     response = payload.get("final_response")
     text = response if isinstance(response, str) else ""
+    usage, provider_cost = _read_token_usage(Path(str(request_path) + ".events.jsonl"))
+    charged = None
+    seq = None
+    if token_budget is not None and grant is not None:
+        settlement = token_budget.settle(
+            grant, usage, role=role, duration_s=duration, ok=error_type is None,
+            error_type=error_type, provider=request.get("provider"),
+            model=request.get("model"), session_id=payload.get("session_id"),
+            provider_cost=provider_cost,
+        )
+        charged = settlement.charged
+        seq = settlement.seq
     return PiSessionResult(
         ok=error_type is None,
         final_text=text,
@@ -165,8 +218,107 @@ def run_pi_prompt(
         duration_s=duration,
         timed_out=timed_out,
         stderr_tail=stderr[-800:].decode("utf-8", "replace"),
-        payload=payload,
+        token_usage=usage,
+        token_charged=charged,
+        token_seq=seq,
+        payload={**payload,
+                 "token_reservation_upper_bound": grant.reservation if grant else None,
+                 "token_charged": charged,
+                 "token_seq": seq,
+                 "token_budget": token_budget.snapshot() if token_budget else None},
     )
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_token_usage(path: Path) -> tuple[dict[str, int], dict[str, Any] | None]:
+    """Sum the usage every completed assistant message reported.
+
+    ``reported_messages`` is the honesty switch the ledger keys off: zero means
+    the service told us nothing, and the call's spend is then *unknown* rather
+    than zero. Reasoning tokens and a provider-supplied cost are carried through
+    when present; nothing is estimated here.
+
+    Only **completed assistant messages** count. ``message_start`` carries the
+    same usage object for a message that is already finished, and the assistant
+    row is preceded by a zero-filled placeholder on ``message_start``, so a
+    reader that summed every record it found would double the real numbers and
+    a reader that accepted any record at all would take the placeholder as a
+    measurement of zero. The provider here reports usage on ``message_end`` for
+    the assistant role and nothing anywhere else.
+    """
+    totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+              "reasoning": 0, "total": 0, "reported_messages": 0}
+    cost: dict[str, Any] | None = None
+    if not path.is_file():
+        return totals, cost
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line).get("event", {})
+                if not isinstance(event, dict) or event.get("type") != "message_end":
+                    continue
+                message = event.get("message") or {}
+                if not isinstance(message, dict):
+                    continue
+                # The role is absent on a record the trace shortened (and on the
+                # assistant row of some providers); a `usage` object is the thing
+                # actually being looked for, and an assistant-only rule would
+                # silently drop exactly the long, expensive replies.
+                if message.get("role") not in (None, "assistant"):
+                    continue
+                usage = message.get("usage")
+                if not isinstance(usage, dict) or not usage:
+                    continue
+                fields = {
+                    "input": usage.get("input", usage.get("inputTokens")),
+                    "output": usage.get("output", usage.get("outputTokens")),
+                    "cache_read": usage.get("cacheRead", usage.get("cache_read")),
+                    "cache_write": usage.get("cacheWrite", usage.get("cache_write")),
+                    "reasoning": usage.get("reasoning", usage.get("reasoningTokens")),
+                }
+                counted = 0
+                for key, raw in fields.items():
+                    value = _as_int(raw)
+                    if value is not None:
+                        totals[key] += value
+                        counted += value
+                reported = _as_int(usage.get("totalTokens", usage.get("total_tokens")))
+                totals["total"] += reported if reported is not None else counted
+                totals["reported_messages"] += 1
+                amount = _positive_cost(usage)
+                if amount is not None:
+                    cost = {"amount": amount, "currency": str(usage.get("currency") or "USD")}
+            except (OSError, json.JSONDecodeError, AttributeError):
+                continue
+    return totals, cost
+
+
+def _positive_cost(usage: dict[str, Any]) -> float | None:
+    """A money figure only when the service actually charged something.
+
+    Pi reports an all-zero ``cost`` object on every message here, which is a
+    placeholder rather than a measurement. Returning ``None`` for it keeps the
+    ledger saying "the provider reported no cost" instead of "this was free".
+    """
+    total = usage.get("cost")
+    if isinstance(total, dict):
+        total = total.get("total", total.get("amount"))
+    value = None
+    for raw in (total, usage.get("costUsd"), usage.get("totalCost")):
+        try:
+            candidate = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if candidate > 0:
+            value = candidate
+            break
+    return value
 
 
 __all__ = ["PiSessionResult", "pi_child_env", "run_pi_prompt"]

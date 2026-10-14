@@ -27,7 +27,14 @@ from pathlib import Path
 from typing import Any
 
 from .adapters.base import DiscoveryBackend, TaskSpec
-from .config import BACKEND_IDENTITY_ENV, KNOWN_TASKS, Config, load_config
+from .mof.protocol import PHASE_NAMES
+from .config import (
+    BACKEND_IDENTITY_ENV,
+    KNOWN_TASKS,
+    Config,
+    load_config,
+    standard_library_only_for,
+)
 from .domain.errors import BlockedModelConfiguration, DreamRsiError
 from .domain.models import new_id
 from .evaluator.command import FixedCommandEvaluator
@@ -126,6 +133,9 @@ def _pi_backend(config: Config, run_id: str) -> DiscoveryBackend:
         model=model,
         timeout_s=config.timeouts.agent_s,
         memory_limit_mb=config.timeouts.agent_memory_mb,
+        no_tools=config.pi_no_tools,
+        response_only=config.pi_response_only,
+        standard_library_only=standard_library_only_for(config.task_dir.name),
     )
 
 
@@ -419,6 +429,8 @@ def _run(args: argparse.Namespace, *, live_required: bool) -> int:
         developer=getattr(args, "developer", "scripted"),
         task=args.task,
         agent_timeout_s=getattr(args, "agent_timeout_s", None),
+        pi_no_tools=getattr(args, "pi_no_tools", False),
+        pi_response_only=getattr(args, "pi_response_only", False),
     )
     # The run id must exist before any path is derived from it: the controller,
     # the evaluator workdir and the policy workdirs all hang off it, and they
@@ -568,6 +580,14 @@ def cmd_report(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 
+def _mof(name: str) -> Any:
+    """Resolve a MOF command lazily so importing the CLI stays cheap."""
+    def _run(args: argparse.Namespace) -> int:
+        from .mof import cli as mof_cli
+        return int(getattr(mof_cli, name)(args))
+    return _run
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dream-rsi", description=(__doc__ or "dream-rsi CLI").splitlines()[0])
     parser.add_argument("--project-root", type=Path, default=None)
@@ -599,6 +619,14 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--versions", type=int, default=None)
         p.add_argument("--run-id", default=None)
         p.add_argument("--resume", action="store_true")
+        p.add_argument(
+            "--pi-no-tools", action="store_true",
+            help="disable Pi tools, extensions, MCP, skills, and project context",
+        )
+        p.add_argument(
+            "--pi-response-only", action="store_true",
+            help="require Pi to return the complete candidate between explicit markers",
+        )
         p.add_argument("--task", default=None, choices=KNOWN_TASKS,
                        help="which task under tasks/ to run (default: the bundled knapsack task)")
         p.add_argument(
@@ -622,6 +650,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--provider", default=None)
     p.add_argument("--model", default=None)
     p.set_defaults(func=cmd_model_check)
+
+    p = sub.add_parser(
+        "mof-acceptance",
+        help="check the MOF screening implementation; makes no model call",
+    )
+    p.add_argument("--phase", default="pilot", choices=PHASE_NAMES)
+    p.set_defaults(func=_mof("cmd_mof_acceptance"))
+
+    p = sub.add_parser("mof-run", help="run one phase of the MOF screening experiment")
+    p.add_argument("--phase", default="pilot", choices=PHASE_NAMES)
+    p.add_argument("--only-split-seed", type=int, default=None)
+    p.add_argument("--only-repeat", type=int, default=None)
+    p.add_argument("--block-limit", type=int, default=None,
+                   help="cap the number of paired blocks (each still runs every arm "
+                        "the phase registers)")
+    p.add_argument("--no-isolation", action="store_true",
+                   help="skip the search-phase vault; only for an offline rehearsal")
+    p.set_defaults(func=_mof("cmd_mof_run"))
+
+    p = sub.add_parser("mof-unseal", help="open the sealed test pool for frozen candidates")
+    p.add_argument("--phase", default="pilot", choices=PHASE_NAMES)
+    p.add_argument("--references-only", action="store_true",
+                   help="recompute the fixed screening references only; re-grades no candidate")
+    p.add_argument("--no-isolation", action="store_true",
+                   help="do not take the held-out data off disk while frozen candidates run")
+    p.set_defaults(func=_mof("cmd_mof_unseal"))
+
+    p = sub.add_parser("mof-report", help="figures, tables and summary.md for a phase")
+    p.add_argument("--phase", default="pilot", choices=PHASE_NAMES)
+    p.set_defaults(func=_mof("cmd_mof_report"))
 
     p = sub.add_parser("report", help="read a finished run back out")
     p.add_argument("--run-id", default=None)

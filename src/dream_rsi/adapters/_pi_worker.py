@@ -146,15 +146,24 @@ class EventTrace:
         text = json.dumps(record, ensure_ascii=False, default=str)
         if len(text) > MAX_TRACE_RECORD_CHARS:
             keep = MAX_TRACE_RECORD_CHARS // 2
-            text = json.dumps(
-                {
-                    "type": record.get("type"),
-                    "trace_truncated_record_chars": len(text),
-                    "head": text[:keep],
-                    "tail": text[-keep:],
-                },
-                ensure_ascii=False,
-            )
+            shortened: dict[str, Any] = {
+                "type": record.get("type"),
+                "trace_truncated_record_chars": len(text),
+                "head": text[:keep],
+                "tail": text[-keep:],
+            }
+            # A long message is exactly the case where the accounting matters
+            # most, and truncation used to throw the whole `message` object away
+            # with it -- so a 140 kB reply lost its usage and the ledger recorded
+            # a paid call as unreported. The small fields survive on their own.
+            message = record.get("message")
+            if isinstance(message, dict):
+                shortened["message"] = {
+                    key: message.get(key)
+                    for key in ("role", "stopReason", "usage", "model", "provider")
+                    if key in message
+                }
+            text = json.dumps(shortened, ensure_ascii=False)
         self._write_line(text)
 
     def _write_line(self, line: str | dict[str, Any]) -> None:
@@ -206,6 +215,22 @@ def run_request(
     cwd = Path(str(request["cwd"]))
     cwd.mkdir(parents=True, exist_ok=True)
     args = [exe, "--mode", "rpc", "--no-session"]
+    if request.get("no_tools"):
+        # Experiments that return a bounded text artifact must not give the
+        # model filesystem, shell, MCP, skill, or project-instruction access.
+        # This keeps the worker's authority at the prompt boundary.
+        args += [
+            "--no-tools", "--no-mcp", "--no-extensions", "--no-skills",
+            "--no-context-files", "--no-prompt-templates", "--no-themes",
+            "--offline",
+        ]
+        if request.get("system_prompt"):
+            args += ["--system-prompt", str(request["system_prompt"])]
+        if request.get("thinking"):
+            # Recorded on every request: the reasoning setting changes what the
+            # service is asked to do, so an experiment that fixed it in one arm
+            # and not another would not be comparing the same thing.
+            args += ["--thinking", str(request["thinking"])]
     if request.get("provider"):
         args += ["--provider", str(request["provider"])]
     if request.get("model"):
@@ -217,7 +242,8 @@ def run_request(
     )
     events: queue.Queue[dict[str, Any]] = queue.Queue()
     seen: list[str] = []
-    state = {"agent_error": False, "settled_aborted": False, "bad_json": 0}
+    state = {"agent_error": False, "settled_aborted": False, "bad_json": 0,
+             "output_limit": False, "output_bytes": 0}
     texts: list[str] = []
 
     def read_stdout() -> None:
@@ -247,6 +273,20 @@ def run_request(
         if history is not None:
             history.write(record)
         kind = str(record.get("type", ""))
+        inner = record.get("assistantMessageEvent")
+        if kind == "message_update" and isinstance(inner, dict):
+            delta = inner.get("delta")
+            # Only the *deliverable* counts against the ceiling. Thinking deltas
+            # arrive on the same channel with the same shape, and a call cut off
+            # 32 KiB into its reasoning loses the answer it was about to write
+            # while looking, from the outside, exactly like a runaway: the first
+            # live MOF probe died that way, having emitted no text at all.
+            if isinstance(delta, str) and str(inner.get("type", "")) == "text_delta":
+                state["output_bytes"] += len(delta.encode("utf-8"))
+                cap = int(request.get("max_output_bytes") or 0)
+                if cap and state["output_bytes"] > cap and not state["output_limit"]:
+                    state["output_limit"] = True
+                    send({"id": "abort-output-limit", "type": "abort"})
         seen.append(kind)
         if kind in ("agent_error", "extension_error", "error"):
             state["agent_error"] = True
@@ -312,6 +352,10 @@ def run_request(
             lambda m: m.get("type") == "agent_settled",
             float(request.get("settle_s") or SETTLE_DEFAULT_S),
         )
+        if state["output_limit"]:
+            return {"ok": False, "error_type": "PI_OUTPUT_LIMIT",
+                    "error": f"assistant output exceeded {request.get('max_output_bytes')} bytes",
+                    "event_types": seen[:80], "output_bytes": state["output_bytes"]}
         if state["bad_json"] or state["agent_error"] or state["settled_aborted"]:
             return {"ok": False, "error_type": "PI_AGENT_ERROR",
                     "error": "Pi reported an agent/provider error during the run"}

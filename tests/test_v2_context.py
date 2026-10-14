@@ -29,6 +29,7 @@ from dream_rsi.runtime.context import (
 from dream_rsi.runtime.online import run_online_rollout
 from dream_rsi.runtime.policy_development import validate_policy_source
 from dream_rsi.runtime.replay import replay_all_rhos, replay_world, validate_episode_trace
+from dream_rsi.runtime.trajectory import decode_any, node_table
 from dream_rsi.storage.cas import ContentAddressedStore
 
 
@@ -180,10 +181,22 @@ def test_replay_trace_reconstructs_observations_without_external_calls(tmp_path:
     validate_episode_trace(world, episode, 2, 4)
     assert len(backend.contexts) == before
     assert episode.discovery_agent_calls == episode.evaluator_calls == 0
-    step = json.loads(episode.decision_trace[1])
+    # The trace stores each node record once and refers to it by id, so a step
+    # is read through the decoder rather than by index into a self-contained
+    # blob. What the step *contains* is unchanged.
+    step = decode_any(episode)[1]
     assert step["observation"]["nodes"][-1]["observation_json"] == tree.nodes()[1].public_observation_json
     assert "PRIVATE_TEST_INPUT" not in canonical(step)
-    assert world.node_ids()[-1] not in canonical(json.loads(episode.decision_trace[0]))
+    # The trace must expose exactly what the episode observed and nothing else.
+    # The old form of this check looked for one particular node id in the first
+    # step, which only held because the first step exposes the root alone; this
+    # states the property instead of one instance of it.
+    exposed = set(node_table(episode.decision_trace))
+    observed = {world.root_id} | set(episode.revealed_order)
+    assert exposed == observed, (
+        f"trace exposes {sorted(exposed - observed)} that were never observed, and "
+        f"omits {sorted(observed - exposed)}"
+    )
     with pytest.raises(IntegrityError):
         validate_episode_trace(world, replace(episode, n=999), 2, 4)
     with pytest.raises(IntegrityError):

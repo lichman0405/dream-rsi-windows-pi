@@ -73,6 +73,7 @@ from .policy_development import (
     validate_policy_source,
 )
 from .replay import replay_all_rhos
+from .trajectory import render_episode_steps, render_node_table
 from .selector import PolicyScore, Selection, assert_monotonic, select
 
 #: A world with no positive best score cannot be scored by Eq(1) at all: the
@@ -856,13 +857,26 @@ class Controller:
             ))
         except Exception as exc:
             reason = f"developer failed: {type(exc).__name__}: {exc}"
+            # A revision we declined to send is not a broken connection. The
+            # first formal A arm died because its feedback outgrew the model's
+            # context window and the resulting agent error was classified as an
+            # external failure, which blocked the run. The honest reading is that
+            # this revision could not be afforded: keep the incumbent, record why,
+            # and carry on, exactly as a token-budget cut does.
+            context_bound = "CONTEXT_LIMIT_EXCEEDED" in reason
             self.deps.registry.add_revision(Revision(
                 iteration_t=iteration_t, m=revision_m, input_policy_id=incumbent_id,
-                output_policy_id=None, status="DEVELOPER_ERROR",
+                output_policy_id=None,
+                status="CONTEXT_LIMIT" if context_bound else "DEVELOPER_ERROR",
                 feedback_digest=self._digest_text("\n".join(feedback)),
                 failure_reason=reason[:500],
             ))
             self._note(f"t={iteration_t}: {reason}")
+            self._emit(run_id, "policy.development.skipped" if context_bound
+                       else "policy.development.failed",
+                       iteration_t=iteration_t, m=revision_m, reason=reason[:500])
+            if context_bound:
+                return [], [(incumbent_id, reason)]
             if bool(getattr(developer, "is_live", False)) and "call failed" in reason:
                 self.deps.registry.update_run_state(
                     run_id, RunState.BLOCKED_EXTERNAL, note=reason[:500],
@@ -1041,7 +1055,8 @@ class Controller:
         current_version = incumbent_policy
         current_path = incumbent_path
         current_score = incumbent_score
-        feedback = list(self._feedback(history_worlds, current_score))
+        tables_emitted: set[str] = set()
+        feedback = list(self._feedback(history_worlds, current_score, tables_emitted))
 
         # Paper §3: evaluate pi_t^m before asking the developer to write
         # pi_t^(m+1). Each call sees the current version's trajectories and
@@ -1072,7 +1087,7 @@ class Controller:
                 continue
             scored.append(score)
             current_version, current_path, current_score = version, path, score
-            feedback.extend(self._feedback(history_worlds, current_score))
+            feedback.extend(self._feedback(history_worlds, current_score, tables_emitted))
 
         selection = select(deployed=incumbent_score, candidates=[
             s for s in scored if s.policy_version_id != incumbent_id
@@ -1147,8 +1162,17 @@ class Controller:
 
     def _feedback(
         self, worlds: Sequence[SealedWorld], score: PolicyScore,
+        tables_emitted: set[str] | None = None,
     ) -> tuple[str, ...]:
-        """Current version's measured replay scores and revealed trajectories."""
+        """Current version's measured replay scores and revealed trajectories.
+
+        ``tables_emitted`` carries the worlds whose node table has already been
+        written into this selection round's feedback. The same records do not
+        depend on the policy or the rho, so writing them once per world instead
+        of once per episode is what keeps the developer's prompt inside the
+        model's context window; passing ``None`` restores self-contained output
+        for a caller that renders one block in isolation.
+        """
         lines = [
             f"policy {score.policy_version_id} (m={score.m}) mean V={score.mean_value:.12f}"
         ]
@@ -1173,14 +1197,19 @@ class Controller:
                 raise IntegrityError(
                     f"missing replay trajectories for {score.policy_version_id} on {world.world_id}"
                 )
-            for episode in sorted(episodes, key=lambda e: e.rho):
+            ordered = sorted(episodes, key=lambda e: e.rho)
+            if tables_emitted is None or world.world_id not in tables_emitted:
+                lines.extend(render_node_table(ordered))
+                if tables_emitted is not None:
+                    tables_emitted.add(world.world_id)
+            for episode in ordered:
                 lines.append(
                     f"  rho={episode.rho}: n={episode.n}, k={episode.kstar}, "
                     f"best={episode.best_score:.6f}, a={episode.attained_quality:.6f}, "
                     f"stop={episode.stop_reason.value}, batches={episode.selected_batches}, "
                     f"revealed={episode.revealed_order}"
                 )
-                lines.extend(f"    decision={step}" for step in episode.decision_trace)
+                lines.extend(render_episode_steps(episode))
         return tuple(lines)
 
     @staticmethod

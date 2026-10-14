@@ -122,6 +122,8 @@ class Config:
     timeouts: Timeouts = field(default_factory=Timeouts)
     provider: str | None = None
     model: str | None = None
+    pi_no_tools: bool = False
+    pi_response_only: bool = False
     run_id: str | None = None
     resume: bool = False
 
@@ -215,6 +217,8 @@ class Config:
             "developer": self.developer,
             "provider": self.provider,
             "model": self.model,
+            "pi_no_tools": self.pi_no_tools,
+            "pi_response_only": self.pi_response_only,
             "loop": self.loop.to_dict(),
             "timeouts": self.timeouts.to_dict(),
             "task_dir": self.task_dir.name,
@@ -275,8 +279,19 @@ def resolve_identity(
 # than discovered by listing ``tasks/``: discovery would let a stray directory
 # become a runnable task by accident, and the task name is part of ``cfg_digest``,
 # so it has to mean the same thing on every machine.
-KNOWN_TASKS: tuple[str, ...] = ("knapsack",)
+KNOWN_TASKS: tuple[str, ...] = ("knapsack", "mof_screening")
 DEFAULT_TASK = "knapsack"
+
+#: Tasks whose entry file may use third-party numerical libraries. The knapsack
+#: task is deliberately standard-library-only; ``mof_screening`` is not, because
+#: its whole point is that a discovery agent improves a *learning* program. The
+#: prompt a worker receives has to state the rule that actually applies, which is
+#: why this lives here and not inside the shared prompt builder.
+THIRD_PARTY_TASKS: frozenset[str] = frozenset({"mof_screening"})
+
+
+def standard_library_only_for(task_name: str) -> bool:
+    return task_name not in THIRD_PARTY_TASKS
 
 
 def resolve_task(task: str | None = None) -> str:
@@ -306,6 +321,8 @@ def load_config(
     run_id: str | None = None,
     task: str | None = None,
     agent_timeout_s: float | None = None,
+    pi_no_tools: bool = False,
+    pi_response_only: bool = False,
 ) -> Config:
     """Build a :class:`Config` for one of the tasks in :data:`KNOWN_TASKS`.
 
@@ -352,6 +369,8 @@ def load_config(
         timeouts=timeouts,
         provider=resolved_provider,
         model=resolved_model,
+        pi_no_tools=pi_no_tools,
+        pi_response_only=pi_response_only,
         run_id=run_id,
         resume=resume,
     )
@@ -359,6 +378,7 @@ def load_config(
 
 __all__ = [
     "BACKENDS", "BACKEND_IDENTITY_ENV", "DEFAULT_TASK", "DEVELOPERS", "DIGEST_EXCLUDES",
-    "KNOWN_TASKS", "Config", "LoopConfig", "Timeouts", "default_project_root",
-    "load_config", "resolve_identity", "resolve_task",
+    "KNOWN_TASKS", "THIRD_PARTY_TASKS", "Config", "LoopConfig", "Timeouts",
+    "default_project_root", "load_config", "resolve_identity", "resolve_task",
+    "standard_library_only_for",
 ]
